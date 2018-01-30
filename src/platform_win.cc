@@ -138,7 +138,7 @@ std::vector<std::string> GetPlatformClangArguments() {
 
   // clang-format off
   return {
-    "-fms-extensions", "-fms-compatibility", "-fdelayed-template-parsing"
+    // "-fms-extensions", "-fms-compatibility", "-fdelayed-template-parsing"
   };
   // clang-format on
 }
