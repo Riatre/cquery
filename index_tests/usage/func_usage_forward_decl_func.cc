@@ -17,15 +17,13 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [{
-          "spelling": "1:6-1:9",
-          "extent": "1:1-1:11",
-          "content": "void foo()",
+          "spell": "1:6-1:9|-1|1|1",
           "param_spellings": []
         }],
-      "base": [],
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": ["1@4:3-4:6"],
+      "vars": [],
+      "uses": ["4:3-4:6|1|3|32"],
       "callees": []
     }, {
       "id": 1,
@@ -35,13 +33,13 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [],
-      "definition_spelling": "3:6-3:11",
-      "definition_extent": "3:1-5:2",
-      "base": [],
+      "spell": "3:6-3:11|-1|1|2",
+      "extent": "3:1-5:2|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
-      "callees": ["0@4:3-4:6"]
+      "vars": [],
+      "uses": [],
+      "callees": ["4:3-4:6|0|3|32"]
     }],
   "vars": []
 }

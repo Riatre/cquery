@@ -20,15 +20,13 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [{
-          "spelling": "3:6-3:12",
-          "extent": "3:1-3:28",
-          "content": "bool called(bool a, bool b)",
+          "spell": "3:6-3:12|-1|1|1",
           "param_spellings": ["3:18-3:19", "3:26-3:27"]
         }],
-      "base": [],
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": ["1@6:14-6:20"],
+      "vars": [],
+      "uses": ["6:14-6:20|1|3|32"],
       "callees": []
     }, {
       "id": 1,
@@ -38,13 +36,13 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [],
-      "definition_spelling": "5:6-5:12",
-      "definition_extent": "5:1-7:2",
-      "base": [],
+      "spell": "5:6-5:12|-1|1|2",
+      "extent": "5:1-7:2|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
-      "callees": ["0@6:14-6:20"]
+      "vars": [],
+      "uses": [],
+      "callees": ["6:14-6:20|0|3|32"]
     }],
   "vars": [{
       "id": 0,
@@ -53,11 +51,10 @@ OUTPUT:
       "short_name": "MACRO_CALL",
       "hover": "#define MACRO_CALL(e) e",
       "declarations": [],
-      "definition_spelling": "1:9-1:19",
-      "definition_extent": "1:9-1:24",
-      "uses": ["6:3-6:13"],
-      "parent_kind": 0,
-      "kind": 4,
+      "spell": "1:9-1:19|-1|1|2",
+      "extent": "1:9-1:24|-1|1|0",
+      "uses": ["6:3-6:13|-1|1|4"],
+      "kind": 255,
       "storage": 0
     }]
 }

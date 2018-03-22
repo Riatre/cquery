@@ -3,15 +3,18 @@
 #include "queue_manager.h"
 
 namespace {
-struct Ipc_CqueryCallers : public RequestMessage<Ipc_CqueryCallers> {
-  const static IpcId kIpcId = IpcId::CqueryCallers;
+MethodType kMethodType = "$cquery/callers";
+
+struct In_CqueryCallers : public RequestInMessage {
+  MethodType GetMethodType() const override { return kMethodType; }
   lsTextDocumentPositionParams params;
 };
-MAKE_REFLECT_STRUCT(Ipc_CqueryCallers, id, params);
-REGISTER_IPC_MESSAGE(Ipc_CqueryCallers);
+MAKE_REFLECT_STRUCT(In_CqueryCallers, id, params);
+REGISTER_IN_MESSAGE(In_CqueryCallers);
 
-struct CqueryCallersHandler : BaseMessageHandler<Ipc_CqueryCallers> {
-  void Run(Ipc_CqueryCallers* request) override {
+struct Handler_CqueryCallers : BaseMessageHandler<In_CqueryCallers> {
+  MethodType GetMethodType() const override { return kMethodType; }
+  void Run(In_CqueryCallers* request) override {
     QueryFile* file;
     if (!FindFileOrFail(db, project, request->id,
                         request->params.textDocument.uri.GetPath(), &file)) {
@@ -27,16 +30,19 @@ struct CqueryCallersHandler : BaseMessageHandler<Ipc_CqueryCallers> {
          FindSymbolsAtLocation(working_file, file, request->params.position)) {
       if (sym.kind == SymbolKind::Func) {
         QueryFunc& func = db->GetFunc(sym);
-        std::vector<Reference> uses = ToReference(db, func.callers);
-        for (QueryFuncRef func_ref : GetCallersForAllBaseFunctions(db, func))
+        std::vector<Use> uses = func.uses;
+        for (Use func_ref : GetUsesForAllBases(db, func))
           uses.push_back(func_ref);
-        for (QueryFuncRef func_ref : GetCallersForAllDerivedFunctions(db, func))
+        for (Use func_ref : GetUsesForAllDerived(db, func))
           uses.push_back(func_ref);
-        out.result = GetLsLocations(db, working_files, uses);
+        out.result =
+            GetLsLocationExs(db, working_files, uses, config->xref.container,
+                             config->xref.maxNum);
+        break;
       }
     }
-    QueueManager::WriteStdout(IpcId::CqueryCallers, out);
+    QueueManager::WriteStdout(kMethodType, out);
   }
 };
-REGISTER_MESSAGE_HANDLER(CqueryCallersHandler);
+REGISTER_MESSAGE_HANDLER(Handler_CqueryCallers);
 }  // namespace

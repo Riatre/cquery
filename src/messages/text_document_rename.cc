@@ -3,35 +3,33 @@
 #include "queue_manager.h"
 
 namespace {
+MethodType kMethodType = "textDocument/rename";
 
 lsWorkspaceEdit BuildWorkspaceEdit(QueryDatabase* db,
                                    WorkingFiles* working_files,
-                                   const std::vector<Reference>& refs,
+                                   SymbolRef sym,
                                    const std::string& new_text) {
   std::unordered_map<QueryFileId, lsTextDocumentEdit> path_to_edit;
 
-  for (auto& ref : refs) {
-    optional<lsLocation> ls_location =
-        GetLsLocation(db, working_files, ref);
+  EachOccurrence(db, sym, true, [&](Use use) {
+    optional<lsLocation> ls_location = GetLsLocation(db, working_files, use);
     if (!ls_location)
-      continue;
+      return;
 
-    QueryFileId file_id = db->GetFileId(ref);
+    QueryFileId file_id = use.file;
     if (path_to_edit.find(file_id) == path_to_edit.end()) {
       path_to_edit[file_id] = lsTextDocumentEdit();
 
       QueryFile& file = db->files[file_id.id];
       if (!file.def)
-        continue;
+        return;
 
       const std::string& path = file.def->path;
-      path_to_edit[file_id].textDocument.uri =
-          lsDocumentUri::FromPath(path);
+      path_to_edit[file_id].textDocument.uri = lsDocumentUri::FromPath(path);
 
       WorkingFile* working_file = working_files->GetFileByFilename(path);
       if (working_file)
-        path_to_edit[file_id].textDocument.version =
-            working_file->version;
+        path_to_edit[file_id].textDocument.version = working_file->version;
     }
 
     lsTextEdit edit;
@@ -42,7 +40,7 @@ lsWorkspaceEdit BuildWorkspaceEdit(QueryDatabase* db,
     auto& edits = path_to_edit[file_id].edits;
     if (std::find(edits.begin(), edits.end(), edit) == edits.end())
       edits.push_back(edit);
-  }
+  });
 
   lsWorkspaceEdit edit;
   for (const auto& changes : path_to_edit)
@@ -50,8 +48,8 @@ lsWorkspaceEdit BuildWorkspaceEdit(QueryDatabase* db,
   return edit;
 }
 
-struct Ipc_TextDocumentRename : public RequestMessage<Ipc_TextDocumentRename> {
-  const static IpcId kIpcId = IpcId::TextDocumentRename;
+struct In_TextDocumentRename : public RequestInMessage {
+  MethodType GetMethodType() const override { return kMethodType; }
   struct Params {
     // The document to format.
     lsTextDocumentIdentifier textDocument;
@@ -66,12 +64,12 @@ struct Ipc_TextDocumentRename : public RequestMessage<Ipc_TextDocumentRename> {
   };
   Params params;
 };
-MAKE_REFLECT_STRUCT(Ipc_TextDocumentRename::Params,
+MAKE_REFLECT_STRUCT(In_TextDocumentRename::Params,
                     textDocument,
                     position,
                     newName);
-MAKE_REFLECT_STRUCT(Ipc_TextDocumentRename, id, params);
-REGISTER_IPC_MESSAGE(Ipc_TextDocumentRename);
+MAKE_REFLECT_STRUCT(In_TextDocumentRename, id, params);
+REGISTER_IN_MESSAGE(In_TextDocumentRename);
 
 struct Out_TextDocumentRename : public lsOutMessage<Out_TextDocumentRename> {
   lsRequestId id;
@@ -79,8 +77,9 @@ struct Out_TextDocumentRename : public lsOutMessage<Out_TextDocumentRename> {
 };
 MAKE_REFLECT_STRUCT(Out_TextDocumentRename, jsonrpc, id, result);
 
-struct TextDocumentRenameHandler : BaseMessageHandler<Ipc_TextDocumentRename> {
-  void Run(Ipc_TextDocumentRename* request) override {
+struct Handler_TextDocumentRename : BaseMessageHandler<In_TextDocumentRename> {
+  MethodType GetMethodType() const override { return kMethodType; }
+  void Run(In_TextDocumentRename* request) override {
     QueryFileId file_id;
     QueryFile* file;
     if (!FindFileOrFail(db, project, request->id,
@@ -98,14 +97,13 @@ struct TextDocumentRenameHandler : BaseMessageHandler<Ipc_TextDocumentRename> {
     for (SymbolRef sym :
          FindSymbolsAtLocation(working_file, file, request->params.position)) {
       // Found symbol. Return references to rename.
-      out.result = BuildWorkspaceEdit(db, working_files,
-                                      GetUsesOfSymbol(db, sym, true),
-                                      request->params.newName);
+      out.result =
+          BuildWorkspaceEdit(db, working_files, sym, request->params.newName);
       break;
     }
 
-    QueueManager::WriteStdout(IpcId::TextDocumentRename, out);
+    QueueManager::WriteStdout(kMethodType, out);
   }
 };
-REGISTER_MESSAGE_HANDLER(TextDocumentRenameHandler);
+REGISTER_MESSAGE_HANDLER(Handler_TextDocumentRename);
 }  // namespace

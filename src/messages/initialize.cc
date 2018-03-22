@@ -1,24 +1,29 @@
 #include "cache_manager.h"
+#include "diagnostics_engine.h"
 #include "import_pipeline.h"
 #include "include_complete.h"
 #include "message_handler.h"
 #include "platform.h"
 #include "project.h"
 #include "queue_manager.h"
-#include "serializer.h"
+#include "semantic_highlight_symbol_cache.h"
 #include "serializers/json.h"
 #include "timer.h"
+#include "work_thread.h"
 #include "working_files.h"
 
 #include <loguru.hpp>
 
+#include <iostream>
 #include <stdexcept>
+#include <thread>
 
 // TODO Cleanup global variables
 extern std::string g_init_options;
-int g_index_comments;
 
 namespace {
+
+MethodType kMethodType = "initialize";
 
 // Code Lens options.
 struct lsCodeLensOptions {
@@ -38,7 +43,8 @@ struct lsCompletionOptions {
   // for
   // '::' and '>' for '->'. See
   // https://github.com/Microsoft/language-server-protocol/issues/138.
-  std::vector<std::string> triggerCharacters = {".", ":", ">", "#", "<", "\"", "/"};
+  std::vector<std::string> triggerCharacters = {".", ":",  ">", "#",
+                                                "<", "\"", "/"};
 };
 MAKE_REFLECT_STRUCT(lsCompletionOptions, resolveProvider, triggerCharacters);
 
@@ -137,6 +143,8 @@ struct lsServerCapabilities {
   lsSignatureHelpOptions signatureHelpProvider;
   // The server provides goto definition support.
   bool definitionProvider = true;
+  // The server provides Goto Type Definition support.
+  bool typeDefinitionProvider = true;
   // The server provides find references support.
   bool referencesProvider = true;
   // The server provides document highlight support.
@@ -160,7 +168,7 @@ struct lsServerCapabilities {
   // The server provides document link support.
   lsDocumentLinkOptions documentLinkProvider;
   // The server provides execute command support.
-  optional<lsExecuteCommandOptions> executeCommandProvider;
+  lsExecuteCommandOptions executeCommandProvider;
 };
 MAKE_REFLECT_STRUCT(lsServerCapabilities,
                     textDocumentSync,
@@ -454,12 +462,13 @@ struct lsInitializeError {
 };
 MAKE_REFLECT_STRUCT(lsInitializeError, retry);
 
-struct Ipc_InitializeRequest : public RequestMessage<Ipc_InitializeRequest> {
-  const static IpcId kIpcId = IpcId::Initialize;
+struct In_InitializeRequest : public RequestInMessage {
+  MethodType GetMethodType() const override { return kMethodType; }
+
   lsInitializeParams params;
 };
-MAKE_REFLECT_STRUCT(Ipc_InitializeRequest, id, params);
-REGISTER_IPC_MESSAGE(Ipc_InitializeRequest);
+MAKE_REFLECT_STRUCT(In_InitializeRequest, id, params);
+REGISTER_IN_MESSAGE(In_InitializeRequest);
 
 struct Out_InitializeResponse : public lsOutMessage<Out_InitializeResponse> {
   struct InitializeResult {
@@ -471,8 +480,10 @@ struct Out_InitializeResponse : public lsOutMessage<Out_InitializeResponse> {
 MAKE_REFLECT_STRUCT(Out_InitializeResponse::InitializeResult, capabilities);
 MAKE_REFLECT_STRUCT(Out_InitializeResponse, jsonrpc, id, result);
 
-struct InitializeHandler : BaseMessageHandler<Ipc_InitializeRequest> {
-  void Run(Ipc_InitializeRequest* request) override {
+struct Handler_Initialize : BaseMessageHandler<In_InitializeRequest> {
+  MethodType GetMethodType() const override { return kMethodType; }
+
+  void Run(In_InitializeRequest* request) override {
     // Log initialization parameters.
     rapidjson::StringBuffer output;
     rapidjson::Writer<rapidjson::StringBuffer> writer(output);
@@ -481,7 +492,8 @@ struct InitializeHandler : BaseMessageHandler<Ipc_InitializeRequest> {
     LOG_S(INFO) << "Init parameters: " << output.GetString();
 
     if (request->params.rootUri) {
-      std::string project_path = request->params.rootUri->GetPath();
+      std::string project_path =
+          NormalizePath(request->params.rootUri->GetPath());
       LOG_S(INFO) << "[querydb] Initialize in directory " << project_path
                   << " with uri " << request->params.rootUri->raw_uri;
 
@@ -498,11 +510,10 @@ struct InitializeHandler : BaseMessageHandler<Ipc_InitializeRequest> {
             Reflect(json_reader, *config);
           } catch (std::invalid_argument&) {
             // This will not trigger because parse error is handled in
-            // MessageRegistry::Parse in language_server_api.cc
+            // MessageRegistry::Parse in lsp.cc
           }
         }
 
-        g_index_comments = config->index.comments;
         if (config->cacheDirectory.empty()) {
           LOG_S(ERROR) << "cacheDirectory cannot be empty.";
           exit(1);
@@ -567,44 +578,45 @@ struct InitializeHandler : BaseMessageHandler<Ipc_InitializeRequest> {
       out.result.capabilities.documentRangeFormattingProvider = true;
 #endif
 
-      QueueManager::WriteStdout(IpcId::Initialize, out);
+      QueueManager::WriteStdout(kMethodType, out);
 
       // Set project root.
-      config->projectRoot = NormalizePath(request->params.rootUri->GetPath());
-      EnsureEndsInSlash(config->projectRoot);
-      // Create two cache directories for files inside and outside of the project.
+      EnsureEndsInSlash(project_path);
+      config->projectRoot = project_path;
+      // Create two cache directories for files inside and outside of the
+      // project.
       MakeDirectoryRecursive(config->cacheDirectory +
                              EscapeFileName(config->projectRoot));
-      MakeDirectoryRecursive(config->cacheDirectory +
-                             '@' + EscapeFileName(config->projectRoot));
+      MakeDirectoryRecursive(config->cacheDirectory + '@' +
+                             EscapeFileName(config->projectRoot));
 
       Timer time;
+      diag_engine->Init(config);
+      semantic_cache->Init(config);
 
       // Open up / load the project.
-      project->Load(config, config->extraClangArguments,
-                    config->compilationDatabaseDirectory, project_path,
-                    config->resourceDirectory);
+      project->Load(config, project_path);
       time.ResetAndPrint("[perf] Loaded compilation entries (" +
                          std::to_string(project->entries.size()) + " files)");
 
       // Start indexer threads. Start this after loading the project, as that
       // may take a long time. Indexer threads will emit status/progress
       // reports.
-      if (config->indexerCount == 0) {
+      if (config->index.threads == 0) {
         // If the user has not specified how many indexers to run, try to
         // guess an appropriate value. Default to 80% utilization.
         const float kDefaultTargetUtilization = 0.8f;
-        config->indexerCount = (int)(std::thread::hardware_concurrency() *
-                                     kDefaultTargetUtilization);
-        if (config->indexerCount <= 0)
-          config->indexerCount = 1;
+        config->index.threads = (int)(std::thread::hardware_concurrency() *
+                                      kDefaultTargetUtilization);
+        if (config->index.threads <= 0)
+          config->index.threads = 1;
       }
-      LOG_S(INFO) << "Starting " << config->indexerCount << " indexers";
-      for (int i = 0; i < config->indexerCount; ++i) {
+      LOG_S(INFO) << "Starting " << config->index.threads << " indexers";
+      for (int i = 0; i < config->index.threads; ++i) {
         WorkThread::StartThread("indexer" + std::to_string(i), [=]() {
-          Indexer_Main(config, file_consumer_shared, timestamp_manager,
-                       import_manager, import_pipeline_status, project,
-                       working_files, waiter);
+          Indexer_Main(config, diag_engine, file_consumer_shared,
+                       timestamp_manager, import_manager,
+                       import_pipeline_status, project, working_files, waiter);
         });
       }
 
@@ -612,26 +624,13 @@ struct InitializeHandler : BaseMessageHandler<Ipc_InitializeRequest> {
       // files, because that takes a long time.
       include_complete->Rescan();
 
-      auto* queue = QueueManager::instance();
       time.Reset();
-      project->ForAllFilteredFiles(config, [&](int i,
-                                               const Project::Entry& entry) {
-        optional<std::string> content = ReadContent(entry.filename);
-        if (!content) {
-          LOG_S(ERROR) << "When loading project, canont read file "
-                       << entry.filename;
-          return;
-        }
-        bool is_interactive =
-            working_files->GetFileByFilename(entry.filename) != nullptr;
-        queue->index_request.PushBack(Index_Request(
-            entry.filename, entry.args, is_interactive, *content, ICacheManager::Make(config), request->id));
-      });
-
+      project->Index(config, QueueManager::instance(), working_files,
+                     request->id);
       // We need to support multiple concurrent index processes.
       time.ResetAndPrint("[perf] Dispatched initial index requests");
     }
   }
 };
-REGISTER_MESSAGE_HANDLER(InitializeHandler);
+REGISTER_MESSAGE_HANDLER(Handler_Initialize);
 }  // namespace

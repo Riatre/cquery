@@ -3,15 +3,21 @@
 #include "queue_manager.h"
 
 namespace {
-struct Ipc_CqueryBase : public RequestMessage<Ipc_CqueryBase> {
-  const static IpcId kIpcId = IpcId::CqueryBase;
+
+MethodType kMethodType = "$cquery/base";
+
+struct In_CqueryBase : public RequestInMessage {
+  MethodType GetMethodType() const override { return kMethodType; }
+
   lsTextDocumentPositionParams params;
 };
-MAKE_REFLECT_STRUCT(Ipc_CqueryBase, id, params);
-REGISTER_IPC_MESSAGE(Ipc_CqueryBase);
+MAKE_REFLECT_STRUCT(In_CqueryBase, id, params);
+REGISTER_IN_MESSAGE(In_CqueryBase);
 
-struct CqueryBaseHandler : BaseMessageHandler<Ipc_CqueryBase> {
-  void Run(Ipc_CqueryBase* request) override {
+struct Handler_CqueryBase : BaseMessageHandler<In_CqueryBase> {
+  MethodType GetMethodType() const override { return kMethodType; }
+
+  void Run(In_CqueryBase* request) override {
     QueryFile* file;
     if (!FindFileOrFail(db, project, request->id,
                         request->params.textDocument.uri.GetPath(), &file)) {
@@ -23,33 +29,24 @@ struct CqueryBaseHandler : BaseMessageHandler<Ipc_CqueryBase> {
 
     Out_LocationList out;
     out.id = request->id;
-    std::vector<SymbolRef> syms =
-        FindSymbolsAtLocation(working_file, file, request->params.position);
-    // A template definition may be a use of its primary template.
-    // We want to get the definition instead of the use.
-    // Order by |Definition| DESC, range size ASC.
-    std::stable_sort(syms.begin(), syms.end(),
-                     [](const SymbolRef& a, const SymbolRef& b) {
-                       return (a.role & SymbolRole::Definition) >
-                              (b.role & SymbolRole::Definition);
-                     });
-    for (SymbolRef sym : syms) {
+    for (SymbolRef sym :
+         FindSymbolsAtLocation(working_file, file, request->params.position)) {
       if (sym.kind == SymbolKind::Type) {
-        QueryType& type = db->GetType(sym);
-        if (type.def)
-          out.result = GetLsLocations(db, working_files,
-                                      ToReference(db, type.def->parents));
+        if (const auto* def = db->GetType(sym).AnyDef())
+          out.result = GetLsLocationExs(
+              db, working_files, GetDeclarations(db, def->bases),
+              config->xref.container, config->xref.maxNum);
         break;
       } else if (sym.kind == SymbolKind::Func) {
-        QueryFunc& func = db->GetFunc(sym);
-        if (func.def)
-          out.result = GetLsLocations(db, working_files,
-                                      ToReference(db, func.def->base));
+        if (const auto* def = db->GetFunc(sym).AnyDef())
+          out.result = GetLsLocationExs(
+              db, working_files, GetDeclarations(db, def->bases),
+              config->xref.container, config->xref.maxNum);
         break;
       }
     }
-    QueueManager::WriteStdout(IpcId::CqueryBase, out);
+    QueueManager::WriteStdout(kMethodType, out);
   }
 };
-REGISTER_MESSAGE_HANDLER(CqueryBaseHandler);
+REGISTER_MESSAGE_HANDLER(Handler_CqueryBase);
 }  // namespace

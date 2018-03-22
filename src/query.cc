@@ -1,6 +1,7 @@
 #include "query.h"
 
 #include "indexer.h"
+#include "serializer.h"
 #include "serializers/json.h"
 
 #include <doctest/doctest.h>
@@ -10,7 +11,6 @@
 #include <cassert>
 #include <cstdint>
 #include <functional>
-#include <iostream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -30,6 +30,15 @@ void VerifyUnique(const std::vector<T>& values0) {
 #endif
 }
 
+template <typename T>
+void RemoveRange(std::vector<T>* dest, const std::vector<T>& to_remove) {
+  std::unordered_set<T> to_remove_set(to_remove.begin(), to_remove.end());
+  dest->erase(
+      std::remove_if(dest->begin(), dest->end(),
+                     [&](const T& t) { return to_remove_set.count(t) > 0; }),
+      dest->end());
+}
+
 optional<QueryType::Def> ToQuery(const IdMap& id_map,
                                  const IndexType::Def& type) {
   if (type.detailed_name.empty())
@@ -40,17 +49,15 @@ optional<QueryType::Def> ToQuery(const IdMap& id_map,
   result.short_name_offset = type.short_name_offset;
   result.short_name_size = type.short_name_size;
   result.kind = type.kind;
-  result.hover = type.hover;
-  result.comments = type.comments;
+  if (!type.hover.empty())
+    result.hover = type.hover;
+  if (!type.comments.empty())
+    result.comments = type.comments;
   result.file = id_map.primary_file;
-  if (type.definition_spelling)
-    result.definition_spelling =
-        id_map.ToQuery(*type.definition_spelling, SymbolRole::Definition);
-  if (type.definition_extent)
-    result.definition_extent =
-        id_map.ToQuery(*type.definition_extent, SymbolRole::None);
+  result.spell = id_map.ToQuery(type.spell);
+  result.extent = id_map.ToQuery(type.extent);
   result.alias_of = id_map.ToQuery(type.alias_of);
-  result.parents = id_map.ToQuery(type.parents);
+  result.bases = id_map.ToQuery(type.bases);
   result.types = id_map.ToQuery(type.types);
   result.funcs = id_map.ToQuery(type.funcs);
   result.vars = id_map.ToQuery(type.vars);
@@ -68,18 +75,16 @@ optional<QueryFunc::Def> ToQuery(const IdMap& id_map,
   result.short_name_size = func.short_name_size;
   result.kind = func.kind;
   result.storage = func.storage;
-  result.hover = func.hover;
-  result.comments = func.comments;
+  if (!func.hover.empty())
+    result.hover = func.hover;
+  if (!func.comments.empty())
+    result.comments = func.comments;
   result.file = id_map.primary_file;
-  if (func.definition_spelling)
-    result.definition_spelling =
-        id_map.ToQuery(*func.definition_spelling, SymbolRole::Definition);
-  if (func.definition_extent)
-    result.definition_extent =
-        id_map.ToQuery(*func.definition_extent, SymbolRole::None);
+  result.spell = id_map.ToQuery(func.spell);
+  result.extent = id_map.ToQuery(func.extent);
   result.declaring_type = id_map.ToQuery(func.declaring_type);
-  result.base = id_map.ToQuery(func.base);
-  result.locals = id_map.ToQuery(func.locals);
+  result.bases = id_map.ToQuery(func.bases);
+  result.vars = id_map.ToQuery(func.vars);
   result.callees = id_map.ToQuery(func.callees);
   return result;
 }
@@ -92,34 +97,14 @@ optional<QueryVar::Def> ToQuery(const IdMap& id_map, const IndexVar::Def& var) {
   result.detailed_name = var.detailed_name;
   result.short_name_offset = var.short_name_offset;
   result.short_name_size = var.short_name_size;
-  result.hover = var.hover;
-  result.comments = var.comments;
+  if (!var.hover.empty())
+    result.hover = var.hover;
+  if (!var.comments.empty())
+    result.comments = var.comments;
   result.file = id_map.primary_file;
-  if (var.definition_spelling)
-    result.definition_spelling =
-        id_map.ToQuery(*var.definition_spelling, SymbolRole::Definition);
-  if (var.definition_extent)
-    result.definition_extent =
-        id_map.ToQuery(*var.definition_extent, SymbolRole::None);
-  result.variable_type = id_map.ToQuery(var.variable_type);
-  if (result.parent_id)
-    switch (var.parent_kind) {
-      default:
-        break;
-      case SymbolKind::File:
-        result.parent_id = Id<void>(id_map.primary_file);
-        break;
-      case SymbolKind::Func:
-        result.parent_id = Id<void>(id_map.ToQuery(IndexFuncId(*var.parent_id)));
-        break;
-      case SymbolKind::Type:
-        result.parent_id = Id<void>(id_map.ToQuery(IndexTypeId(*var.parent_id)));
-        break;
-      case SymbolKind::Var:
-        result.parent_id = Id<void>(id_map.ToQuery(IndexVarId(*var.parent_id)));
-        break;
-    }
-  result.parent_kind = var.parent_kind;
+  result.spell = id_map.ToQuery(var.spell);
+  result.extent = id_map.ToQuery(var.extent);
+  result.type = id_map.ToQuery(var.type);
   result.kind = var.kind;
   result.storage = var.storage;
   return result;
@@ -129,9 +114,8 @@ optional<QueryVar::Def> ToQuery(const IdMap& id_map, const IndexVar::Def& var) {
 // the destination type already exists, it will be combined. This makes merging
 // updates take longer but reduces import time on the querydb thread.
 template <typename TId, typename TValue>
-void AddMergeableRange(
-    std::vector<MergeableUpdate<TId, TValue>>* dest,
-    std::vector<MergeableUpdate<TId, TValue>>&& source) {
+void AddMergeableRange(std::vector<MergeableUpdate<TId, TValue>>* dest,
+                       std::vector<MergeableUpdate<TId, TValue>>&& source) {
   // TODO: Consider caching the lookup table. It can probably save even more
   // time at the cost of some additional memory.
 
@@ -153,9 +137,9 @@ void AddMergeableRange(
   }
 }
 
-// Compares |previous| and |current|, adding all elements that are
-// in |previous| but not |current| to |removed|, and all elements
-// that are in |current| but not |previous| to |added|.
+// Compares |previous| and |current|, adding all elements that are in |previous|
+// but not |current| to |removed|, and all elements that are in |current| but
+// not |previous| to |added|.
 //
 // Returns true iff |removed| or |added| are non-empty.
 template <typename T>
@@ -231,9 +215,12 @@ void CompareGroups(std::vector<T>& previous_data,
   }
 }
 
-QueryFile::DefUpdate BuildFileDefUpdate(const IdMap& id_map, const IndexFile& indexed) {
+QueryFile::DefUpdate BuildFileDefUpdate(const IdMap& id_map,
+                                        const IndexFile& indexed) {
   QueryFile::Def def;
+  def.file = id_map.primary_file;
   def.path = indexed.path;
+  def.args = indexed.args;
   def.includes = indexed.includes;
   def.inactive_regions = indexed.skipped_by_preprocessor;
   def.dependencies = indexed.dependencies;
@@ -246,76 +233,72 @@ QueryFile::DefUpdate BuildFileDefUpdate(const IdMap& id_map, const IndexFile& in
       case LanguageId::Cpp:
         return "cpp";
       case LanguageId::ObjC:
-        return "objectivec";
+        return "objective-c";
+      case LanguageId::ObjCpp:
+        return "objective-cpp";
       default:
         return "";
     }
   }();
 
-  auto add_outline = [&](Range range, RawId id, SymbolKind kind,
-                          SymbolRole role) {
-    def.outline.push_back(SymbolRef(range, Id<void>(id), kind, role));
+  auto add_all_symbols = [&](Use use, Id<void> id, SymbolKind kind) {
+    def.all_symbols.push_back(SymbolRef(use.range, id, kind, use.role));
   };
-  auto add_all_symbols = [&](Range range, RawId id, SymbolKind kind,
-                             SymbolRole role) {
-    def.all_symbols.push_back(SymbolRef(range, Id<void>(id), kind, role));
+  auto add_outline = [&](Use use, Id<void> id, SymbolKind kind) {
+    def.outline.push_back(SymbolRef(use.range, id, kind, use.role));
   };
 
   for (const IndexType& type : indexed.types) {
-    RawId id = id_map.ToQuery(type.id).id;
-    if (type.def.definition_spelling.has_value())
-      add_all_symbols(*type.def.definition_spelling, id, SymbolKind::Type,
-                      SymbolRole::Definition);
-    if (type.def.definition_extent)
-      add_outline(*type.def.definition_extent, id, SymbolKind::Type,
-                  SymbolRole::None);
-    for (const Reference& use : type.uses)
-      add_all_symbols(use.range, id, SymbolKind::Type, use.role);
+    QueryTypeId id = id_map.ToQuery(type.id);
+    if (type.def.spell)
+      add_all_symbols(*type.def.spell, id, SymbolKind::Type);
+    if (type.def.extent)
+      add_outline(*type.def.extent, id, SymbolKind::Type);
+    for (Use decl : type.declarations) {
+      add_all_symbols(decl, id, SymbolKind::Type);
+      // Constructor positions have references to the class,
+      // which we do not want to show in textDocument/documentSymbol
+      if (!(decl.role & Role::Reference))
+        add_outline(decl, id, SymbolKind::Type);
+    }
+    for (Use use : type.uses)
+      add_all_symbols(use, id, SymbolKind::Type);
   }
   for (const IndexFunc& func : indexed.funcs) {
-    RawId id = id_map.ToQuery(func.id).id;
-    if (func.def.definition_spelling.has_value())
-      add_all_symbols(*func.def.definition_spelling, id, SymbolKind::Func,
-                      SymbolRole::Definition);
-    if (func.def.definition_extent.has_value())
-      add_outline(*func.def.definition_extent, id,
-                   SymbolKind::Func, SymbolRole::None);
+    QueryFuncId id = id_map.ToQuery(func.id);
+    if (func.def.spell)
+      add_all_symbols(*func.def.spell, id, SymbolKind::Func);
+    if (func.def.extent)
+      add_outline(*func.def.extent, id, SymbolKind::Func);
     for (const IndexFunc::Declaration& decl : func.declarations) {
-      add_all_symbols(decl.spelling, id, SymbolKind::Func,
-                      SymbolRole::Declaration);
-      add_outline(decl.spelling, id, SymbolKind::Func, SymbolRole::Declaration);
+      add_all_symbols(decl.spell, id, SymbolKind::Func);
+      add_outline(decl.spell, id, SymbolKind::Func);
     }
-    for (const IndexFuncRef& caller : func.callers) {
+    for (Use use : func.uses) {
       // Make ranges of implicit function calls larger (spanning one more column
       // to the left/right). This is hacky but useful. e.g.
       // textDocument/definition on the space/semicolon in `A a;` or `return
       // 42;` will take you to the constructor.
-      Range range = caller.range;
-      if (caller.role & SymbolRole::Implicit) {
-        if (range.start.column > 0)
-          range.start.column--;
-        range.end.column++;
+      if (use.role & Role::Implicit) {
+        if (use.range.start.column > 0)
+          use.range.start.column--;
+        use.range.end.column++;
       }
-      add_all_symbols(range, id, SymbolKind::Func,
-                      caller.role | SymbolRole::CalledBy);
+      add_all_symbols(use, id, SymbolKind::Func);
     }
   }
   for (const IndexVar& var : indexed.vars) {
-    if (var.def.definition_spelling)
-      add_all_symbols(*var.def.definition_spelling, id_map.ToQuery(var.id).id,
-                      SymbolKind::Var, SymbolRole::Definition);
-    if (var.def.definition_extent.has_value())
-      add_outline(*var.def.definition_extent, id_map.ToQuery(var.id).id,
-                  SymbolKind::Var, SymbolRole::None);
-    for (const Range& decl : var.declarations) {
-      add_all_symbols(decl, id_map.ToQuery(var.id).id, SymbolKind::Var,
-                      SymbolRole::Definition);
-      add_outline(decl, id_map.ToQuery(var.id).id, SymbolKind::Var,
-                  SymbolRole::Declaration);
+    QueryVarId id = id_map.ToQuery(var.id);
+    if (var.def.spell)
+      add_all_symbols(*var.def.spell, id, SymbolKind::Var);
+    if (var.def.extent)
+      add_outline(*var.def.extent, id, SymbolKind::Var);
+    for (Use decl : var.declarations) {
+      add_all_symbols(decl, id, SymbolKind::Var);
+      add_outline(decl, id, SymbolKind::Var);
     }
-    for (auto& use : var.uses)
-      add_all_symbols(use.range, id_map.ToQuery(var.id).id, SymbolKind::Var,
-                      use.role);
+    for (Use use : var.uses)
+      add_all_symbols(use, id, SymbolKind::Var);
   }
 
   std::sort(def.outline.begin(), def.outline.end(),
@@ -391,6 +374,18 @@ Maybe<QueryVarId> GetQueryVarIdFromUsr(QueryDatabase* query_db,
   return QueryVarId(idx);
 }
 
+// Returns true if an element with the same file is found.
+template <typename Q>
+bool TryReplaceDef(std::forward_list<Q>& def_list, Q&& def) {
+  for (auto& def1 : def_list)
+    if (def1.file == def.file) {
+      if (!def1.spell || def.spell)
+        def1 = std::move(def);
+      return true;
+    }
+  return false;
+}
+
 }  // namespace
 
 Maybe<QueryFileId> QueryDatabase::GetQueryFileIdFromPath(
@@ -432,38 +427,11 @@ IdMap::IdMap(QueryDatabase* query_db, const IdCache& local_ids)
         *GetQueryVarIdFromUsr(query_db, entry.second, true);
 }
 
-Reference IdMap::ToQuery(Range range, SymbolRole role) const {
-  return Reference{range, Id<void>(primary_file), SymbolKind:: File, role};
-}
-Reference IdMap::ToQuery(Reference ref) const {
-  switch (ref.kind) {
-    case SymbolKind::Invalid:
-    case SymbolKind::File:
-      ref.kind = SymbolKind::File;
-      ref.id = Id<void>(primary_file);
-      break;
-    case SymbolKind::Func:
-      ref.id = Id<void>(
-          cached_func_ids_.find(IndexFuncId(ref.id))->second);
-      break;
-    case SymbolKind::Type:
-      ref.id = Id<void>(
-          cached_type_ids_.find(IndexTypeId(ref.id))->second);
-      break;
-    case SymbolKind::Var:
-      ref.id =
-          Id<void>(cached_var_ids_.find(IndexVarId(ref.id))->second);
-      break;
-  }
-  return ref;
-}
 QueryTypeId IdMap::ToQuery(IndexTypeId id) const {
   assert(cached_type_ids_.find(id) != cached_type_ids_.end());
   return QueryTypeId(cached_type_ids_.find(id)->second);
 }
 QueryFuncId IdMap::ToQuery(IndexFuncId id) const {
-  if (id == IndexFuncId())
-    return QueryFuncId();
   assert(cached_func_ids_.find(id) != cached_func_ids_.end());
   return QueryFuncId(cached_func_ids_.find(id)->second);
 }
@@ -471,33 +439,37 @@ QueryVarId IdMap::ToQuery(IndexVarId id) const {
   assert(cached_var_ids_.find(id) != cached_var_ids_.end());
   return QueryVarId(cached_var_ids_.find(id)->second);
 }
-QueryFuncRef IdMap::ToQuery(IndexFuncRef ref) const {
-  QueryFuncRef ret(ref.range, ref.id, ref.kind, ref.role);
+
+Use IdMap::ToQuery(Reference ref) const {
+  Use ret(ref.range, ref.id, ref.kind, ref.role, primary_file);
   switch (ref.kind) {
-    default:
+    case SymbolKind::Invalid:
       break;
     case SymbolKind::File:
-      ret.id = Id<void>(primary_file);
+      ret.id = primary_file;
       break;
     case SymbolKind::Func:
-      ret.id = Id<void>(ToQuery(IndexFuncId(ref.id)));
+      ret.id = ToQuery(IndexFuncId(ref.id));
       break;
     case SymbolKind::Type:
-      ret.id = Id<void>(ToQuery(IndexTypeId(ref.id)));
+      ret.id = ToQuery(IndexTypeId(ref.id));
+      break;
+    case SymbolKind::Var:
+      ret.id = ToQuery(IndexVarId(ref.id));
       break;
   }
   return ret;
 }
-Reference IdMap::ToQuery(IndexFunc::Declaration decl) const {
-  // TODO: expose more than just QueryLocation.
-  return Reference{decl.spelling, Id<void>(primary_file), SymbolKind::File, SymbolRole::Declaration};
+SymbolRef IdMap::ToQuery(SymbolRef ref) const {
+  ref.Reference::operator=(ToQuery(static_cast<Reference>(ref)));
+  return ref;
 }
-std::vector<Reference> IdMap::ToQuery(const std::vector<Range>& a) const {
-  std::vector<Reference> ret;
-  ret.reserve(a.size());
-  for (auto& x : a)
-    ret.push_back(ToQuery(x, SymbolRole::Reference));
-  return ret;
+Use IdMap::ToQuery(Use use) const {
+  return ToQuery(static_cast<Reference>(use));
+}
+
+Use IdMap::ToQuery(IndexFunc::Declaration decl) const {
+  return ToQuery(static_cast<Reference>(decl.spell));
 }
 
 // ----------------------
@@ -556,22 +528,24 @@ IndexUpdate::IndexUpdate(const IdMap& previous_id_map,
       previous_file.types, current_file.types,
       /*onRemoved:*/
       [this, &previous_id_map](IndexType* type) {
-        if (type->def.definition_spelling)
+        if (type->def.spell)
           types_removed.push_back(type->usr);
-        else {
-          if (!type->derived.empty())
-            types_derived.push_back(QueryType::DerivedUpdate(
-                previous_id_map.ToQuery(type->id), {},
-                previous_id_map.ToQuery(type->derived)));
-          if (!type->instances.empty())
-            types_instances.push_back(QueryType::InstancesUpdate(
-                previous_id_map.ToQuery(type->id), {},
-                previous_id_map.ToQuery(type->instances)));
-          if (!type->uses.empty())
-            types_uses.push_back(
-                QueryType::UsesUpdate(previous_id_map.ToQuery(type->id), {},
-                                      previous_id_map.ToQuery(type->uses)));
-        }
+        if (!type->declarations.empty())
+          types_declarations.push_back(QueryType::DeclarationsUpdate(
+              previous_id_map.ToQuery(type->id), {},
+              previous_id_map.ToQuery(type->declarations)));
+        if (!type->derived.empty())
+          types_derived.push_back(
+              QueryType::DerivedUpdate(previous_id_map.ToQuery(type->id), {},
+                                       previous_id_map.ToQuery(type->derived)));
+        if (!type->instances.empty())
+          types_instances.push_back(QueryType::InstancesUpdate(
+              previous_id_map.ToQuery(type->id), {},
+              previous_id_map.ToQuery(type->instances)));
+        if (!type->uses.empty())
+          types_uses.push_back(
+              QueryType::UsesUpdate(previous_id_map.ToQuery(type->id), {},
+                                    previous_id_map.ToQuery(type->uses)));
       },
       /*onAdded:*/
       [this, &current_id_map](IndexType* type) {
@@ -580,6 +554,10 @@ IndexUpdate::IndexUpdate(const IdMap& previous_id_map,
         if (def_update)
           types_def_update.push_back(
               QueryType::DefUpdate(type->usr, std::move(*def_update)));
+        if (!type->declarations.empty())
+          types_declarations.push_back(QueryType::DeclarationsUpdate(
+              current_id_map.ToQuery(type->id),
+              current_id_map.ToQuery(type->declarations)));
         if (!type->derived.empty())
           types_derived.push_back(
               QueryType::DerivedUpdate(current_id_map.ToQuery(type->id),
@@ -607,10 +585,11 @@ IndexUpdate::IndexUpdate(const IdMap& previous_id_map,
               current->usr, std::move(*current_remapped_def)));
         }
 
+        PROCESS_UPDATE_DIFF(QueryTypeId, types_declarations, declarations, Use);
         PROCESS_UPDATE_DIFF(QueryTypeId, types_derived, derived, QueryTypeId);
         PROCESS_UPDATE_DIFF(QueryTypeId, types_instances, instances,
                             QueryVarId);
-        PROCESS_UPDATE_DIFF(QueryTypeId, types_uses, uses, Reference);
+        PROCESS_UPDATE_DIFF(QueryTypeId, types_uses, uses, Use);
       });
 
   // Functions
@@ -618,22 +597,20 @@ IndexUpdate::IndexUpdate(const IdMap& previous_id_map,
       previous_file.funcs, current_file.funcs,
       /*onRemoved:*/
       [this, &previous_id_map](IndexFunc* func) {
-        if (func->def.definition_spelling) {
-          funcs_removed.push_back(func->usr);
-        } else {
-          if (!func->declarations.empty())
-            funcs_declarations.push_back(QueryFunc::DeclarationsUpdate(
-                previous_id_map.ToQuery(func->id), {},
-                previous_id_map.ToQuery(func->declarations)));
-          if (!func->derived.empty())
-            funcs_derived.push_back(QueryFunc::DerivedUpdate(
-                previous_id_map.ToQuery(func->id), {},
-                previous_id_map.ToQuery(func->derived)));
-          if (!func->callers.empty())
-            funcs_callers.push_back(QueryFunc::CallersUpdate(
-                previous_id_map.ToQuery(func->id), {},
-                previous_id_map.ToQuery(func->callers)));
-        }
+        if (func->def.spell)
+          funcs_removed.emplace_back(func->usr, previous_id_map.primary_file);
+        if (!func->declarations.empty())
+          funcs_declarations.push_back(QueryFunc::DeclarationsUpdate(
+              previous_id_map.ToQuery(func->id), {},
+              previous_id_map.ToQuery(func->declarations)));
+        if (!func->derived.empty())
+          funcs_derived.push_back(
+              QueryFunc::DerivedUpdate(previous_id_map.ToQuery(func->id), {},
+                                       previous_id_map.ToQuery(func->derived)));
+        if (!func->uses.empty())
+          funcs_uses.push_back(
+              QueryFunc::UsesUpdate(previous_id_map.ToQuery(func->id), {},
+                                    previous_id_map.ToQuery(func->uses)));
       },
       /*onAdded:*/
       [this, &current_id_map](IndexFunc* func) {
@@ -650,10 +627,10 @@ IndexUpdate::IndexUpdate(const IdMap& previous_id_map,
           funcs_derived.push_back(
               QueryFunc::DerivedUpdate(current_id_map.ToQuery(func->id),
                                        current_id_map.ToQuery(func->derived)));
-        if (!func->callers.empty())
-          funcs_callers.push_back(
-              QueryFunc::CallersUpdate(current_id_map.ToQuery(func->id),
-                                       current_id_map.ToQuery(func->callers)));
+        if (!func->uses.empty())
+          funcs_uses.push_back(
+              QueryFunc::UsesUpdate(current_id_map.ToQuery(func->id),
+                                    current_id_map.ToQuery(func->uses)));
       },
       /*onFound:*/
       [this, &previous_id_map, &current_id_map](IndexFunc* previous,
@@ -669,10 +646,9 @@ IndexUpdate::IndexUpdate(const IdMap& previous_id_map,
               current->usr, std::move(*current_remapped_def)));
         }
 
-        PROCESS_UPDATE_DIFF(QueryFuncId, funcs_declarations, declarations,
-                            Reference);
+        PROCESS_UPDATE_DIFF(QueryFuncId, funcs_declarations, declarations, Use);
         PROCESS_UPDATE_DIFF(QueryFuncId, funcs_derived, derived, QueryFuncId);
-        PROCESS_UPDATE_DIFF(QueryFuncId, funcs_callers, callers, QueryFuncRef);
+        PROCESS_UPDATE_DIFF(QueryFuncId, funcs_uses, uses, Use);
       });
 
   // Variables
@@ -680,18 +656,16 @@ IndexUpdate::IndexUpdate(const IdMap& previous_id_map,
       previous_file.vars, current_file.vars,
       /*onRemoved:*/
       [this, &previous_id_map](IndexVar* var) {
-        if (var->def.definition_spelling) {
-          vars_removed.push_back(var->usr);
-        } else {
-          if (!var->declarations.empty())
-            vars_declarations.push_back(QueryVar::DeclarationsUpdate(
-                previous_id_map.ToQuery(var->id), {},
-                previous_id_map.ToQuery(var->declarations)));
-          if (!var->uses.empty())
-            vars_uses.push_back(
-                QueryVar::UsesUpdate(previous_id_map.ToQuery(var->id), {},
-                                     previous_id_map.ToQuery(var->uses)));
-        }
+        if (var->def.spell)
+          vars_removed.emplace_back(var->usr, previous_id_map.primary_file);
+        if (!var->declarations.empty())
+          vars_declarations.push_back(QueryVar::DeclarationsUpdate(
+              previous_id_map.ToQuery(var->id), {},
+              previous_id_map.ToQuery(var->declarations)));
+        if (!var->uses.empty())
+          vars_uses.push_back(
+              QueryVar::UsesUpdate(previous_id_map.ToQuery(var->id), {},
+                                   previous_id_map.ToQuery(var->uses)));
       },
       /*onAdded:*/
       [this, &current_id_map](IndexVar* var) {
@@ -721,9 +695,8 @@ IndexUpdate::IndexUpdate(const IdMap& previous_id_map,
           vars_def_update.push_back(QueryVar::DefUpdate(
               current->usr, std::move(*current_remapped_def)));
 
-        PROCESS_UPDATE_DIFF(QueryVarId, vars_declarations, declarations,
-                            Reference);
-        PROCESS_UPDATE_DIFF(QueryVarId, vars_uses, uses, Reference);
+        PROCESS_UPDATE_DIFF(QueryVarId, vars_declarations, declarations, Use);
+        PROCESS_UPDATE_DIFF(QueryVarId, vars_uses, uses, Use);
       });
 
 #undef PROCESS_UPDATE_DIFF
@@ -732,7 +705,8 @@ IndexUpdate::IndexUpdate(const IdMap& previous_id_map,
 // This function runs on an indexer thread.
 void IndexUpdate::Merge(IndexUpdate&& update) {
 #define INDEX_UPDATE_APPEND(name) AddRange(&name, std::move(update.name));
-#define INDEX_UPDATE_MERGE(name) AddMergeableRange(&name, std::move(update.name));
+#define INDEX_UPDATE_MERGE(name) \
+  AddMergeableRange(&name, std::move(update.name));
 
   INDEX_UPDATE_APPEND(files_removed);
   INDEX_UPDATE_APPEND(files_def_update);
@@ -747,7 +721,7 @@ void IndexUpdate::Merge(IndexUpdate&& update) {
   INDEX_UPDATE_APPEND(funcs_def_update);
   INDEX_UPDATE_MERGE(funcs_declarations);
   INDEX_UPDATE_MERGE(funcs_derived);
-  INDEX_UPDATE_MERGE(funcs_callers);
+  INDEX_UPDATE_MERGE(funcs_uses);
 
   INDEX_UPDATE_APPEND(vars_removed);
   INDEX_UPDATE_APPEND(vars_def_update);
@@ -760,7 +734,7 @@ void IndexUpdate::Merge(IndexUpdate&& update) {
 
 std::string IndexUpdate::ToString() {
   rapidjson::StringBuffer output;
-  rapidjson::Writer<rapidjson::StringBuffer> writer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(output);
   JsonWriter json_writer(&writer);
   IndexUpdate& update = *this;
   Reflect(json_writer, update);
@@ -803,33 +777,39 @@ void QueryDatabase::RemoveUsrs(SymbolKind usr_kind,
         QueryType& type = types[usr_to_type[usr].id];
         if (type.symbol_idx)
           symbols[type.symbol_idx->id].kind = SymbolKind::Invalid;
-        //type.def = QueryType::Def();
-        type.def = nullopt;
+        type.def.clear();
       }
       break;
     }
+    default:
+      break;
+  }
+}
+
+void QueryDatabase::RemoveUsrs(
+    SymbolKind usr_kind,
+    const std::vector<WithUsr<QueryFileId>>& to_remove) {
+  switch (usr_kind) {
     case SymbolKind::Func: {
-      for (const Usr& usr : to_remove) {
-        QueryFunc& func = funcs[usr_to_func[usr].id];
-        if (func.symbol_idx)
-          symbols[func.symbol_idx->id].kind = SymbolKind::Invalid;
-        //func.def = QueryFunc::Def();
-        func.def = nullopt;
+      for (const auto& usr_file : to_remove) {
+        QueryFunc& func = funcs[usr_to_func[usr_file.usr].id];
+        func.def.remove_if([&](const QueryFunc::Def& def) {
+          return def.file == usr_file.value;
+        });
       }
       break;
     }
     case SymbolKind::Var: {
-      for (const Usr& usr : to_remove) {
-        QueryVar& var = vars[usr_to_var[usr].id];
-        if (var.symbol_idx)
-          symbols[var.symbol_idx->id].kind = SymbolKind::Invalid;
-        //var.def = QueryVar::Def();
-        var.def = nullopt;
+      for (const auto& usr_file : to_remove) {
+        QueryVar& var = vars[usr_to_var[usr_file.usr].id];
+        var.def.remove_if([&](const QueryVar::Def& def) {
+          return def.file == usr_file.value;
+        });
       }
       break;
     }
-    case SymbolKind::File:
-    case SymbolKind::Invalid:
+    default:
+      assert(false);
       break;
   }
 }
@@ -856,6 +836,7 @@ void QueryDatabase::ApplyIndexUpdate(IndexUpdate* update) {
 
   RemoveUsrs(SymbolKind::Type, update->types_removed);
   ImportOrUpdate(std::move(update->types_def_update));
+  HANDLE_MERGEABLE(types_declarations, declarations, types);
   HANDLE_MERGEABLE(types_derived, derived, types);
   HANDLE_MERGEABLE(types_instances, instances, types);
   HANDLE_MERGEABLE(types_uses, uses, types);
@@ -864,7 +845,7 @@ void QueryDatabase::ApplyIndexUpdate(IndexUpdate* update) {
   ImportOrUpdate(std::move(update->funcs_def_update));
   HANDLE_MERGEABLE(funcs_declarations, declarations, funcs);
   HANDLE_MERGEABLE(funcs_derived, derived, funcs);
-  HANDLE_MERGEABLE(funcs_callers, callers, funcs);
+  HANDLE_MERGEABLE(funcs_uses, uses, funcs);
 
   RemoveUsrs(SymbolKind::Var, update->vars_removed);
   ImportOrUpdate(std::move(update->vars_def_update));
@@ -885,8 +866,7 @@ void QueryDatabase::ImportOrUpdate(
     QueryFile& existing = files[it->second.id];
 
     existing.def = def.value;
-    UpdateSymbols(&existing.symbol_idx, SymbolKind::File,
-                        it->second.id);
+    UpdateSymbols(&existing.symbol_idx, SymbolKind::File, it->second);
   }
 }
 
@@ -902,13 +882,9 @@ void QueryDatabase::ImportOrUpdate(
 
     assert(it->second.id >= 0 && it->second.id < types.size());
     QueryType& existing = types[it->second.id];
-
-    // Keep the existing definition if it is higher quality.
-    if (!(existing.def && existing.def->definition_spelling &&
-          !def.value.definition_spelling)) {
-      existing.def = std::move(def.value);
-      UpdateSymbols(&existing.symbol_idx, SymbolKind::Type,
-                    it->second.id);
+    if (!TryReplaceDef(existing.def, std::move(def.value))) {
+      existing.def.push_front(std::move(def.value));
+      UpdateSymbols(&existing.symbol_idx, SymbolKind::Type, it->second);
     }
   }
 }
@@ -925,13 +901,9 @@ void QueryDatabase::ImportOrUpdate(
 
     assert(it->second.id >= 0 && it->second.id < funcs.size());
     QueryFunc& existing = funcs[it->second.id];
-
-    // Keep the existing definition if it is higher quality.
-    if (!(existing.def && existing.def->definition_spelling &&
-          !def.value.definition_spelling)) {
-      existing.def = std::move(def.value);
-      UpdateSymbols(&existing.symbol_idx, SymbolKind::Func,
-                    it->second.id);
+    if (!TryReplaceDef(existing.def, std::move(def.value))) {
+      existing.def.push_front(std::move(def.value));
+      UpdateSymbols(&existing.symbol_idx, SymbolKind::Func, it->second);
     }
   }
 }
@@ -947,29 +919,26 @@ void QueryDatabase::ImportOrUpdate(std::vector<QueryVar::DefUpdate>&& updates) {
 
     assert(it->second.id >= 0 && it->second.id < vars.size());
     QueryVar& existing = vars[it->second.id];
-
-    // Keep the existing definition if it is higher quality.
-    if (!(existing.def && existing.def->definition_spelling &&
-          !def.value.definition_spelling)) {
-      existing.def = std::move(def.value);
-      if (!def.value.is_local())
-        UpdateSymbols(&existing.symbol_idx, SymbolKind::Var,
-                      it->second.id);
+    if (!TryReplaceDef(existing.def, std::move(def.value))) {
+      existing.def.push_front(std::move(def.value));
+      if (!existing.def.front().is_local())
+        UpdateSymbols(&existing.symbol_idx, SymbolKind::Var, it->second);
     }
   }
 }
 
 void QueryDatabase::UpdateSymbols(Maybe<Id<void>>* symbol_idx,
                                   SymbolKind kind,
-                                  RawId idx) {
-  if (!symbol_idx->has_value()) {
+                                  Id<void> idx) {
+  if (!symbol_idx->HasValue()) {
     *symbol_idx = Id<void>(symbols.size());
     symbols.push_back(SymbolIdx{idx, kind});
   }
 }
 
+// For Func, the returned name does not include parameters.
 std::string_view QueryDatabase::GetSymbolDetailedName(RawId symbol_idx) const {
-  RawId idx = symbols[symbol_idx].idx;
+  RawId idx = symbols[symbol_idx].id.id;
   switch (symbols[symbol_idx].kind) {
     default:
       break;
@@ -978,23 +947,23 @@ std::string_view QueryDatabase::GetSymbolDetailedName(RawId symbol_idx) const {
         return files[idx].def->path;
       break;
     case SymbolKind::Func:
-      if (funcs[idx].def)
-        return funcs[idx].def->detailed_name;
+      if (const auto* def = funcs[idx].AnyDef())
+        return def->DetailedName(false);
       break;
     case SymbolKind::Type:
-      if (types[idx].def)
-        return types[idx].def->detailed_name;
+      if (const auto* def = types[idx].AnyDef())
+        return def->detailed_name;
       break;
     case SymbolKind::Var:
-      if (vars[idx].def)
-        return vars[idx].def->detailed_name;
+      if (const auto* def = vars[idx].AnyDef())
+        return def->detailed_name;
       break;
   }
   return "";
 }
 
 std::string_view QueryDatabase::GetSymbolShortName(RawId symbol_idx) const {
-  RawId idx = symbols[symbol_idx].idx;
+  RawId idx = symbols[symbol_idx].id.id;
   switch (symbols[symbol_idx].kind) {
     default:
       break;
@@ -1003,21 +972,20 @@ std::string_view QueryDatabase::GetSymbolShortName(RawId symbol_idx) const {
         return files[idx].def->path;
       break;
     case SymbolKind::Func:
-      if (funcs[idx].def)
-        return funcs[idx].def->ShortName();
+      if (const auto* def = funcs[idx].AnyDef())
+        return def->ShortName();
       break;
     case SymbolKind::Type:
-      if (types[idx].def)
-        return types[idx].def->ShortName();
+      if (const auto* def = types[idx].AnyDef())
+        return def->ShortName();
       break;
     case SymbolKind::Var:
-      if (vars[idx].def)
-        return vars[idx].def->ShortName();
+      if (const auto* def = vars[idx].AnyDef())
+        return def->ShortName();
       break;
   }
   return "";
 }
-
 
 TEST_SUITE("query") {
   IndexUpdate GetDelta(IndexFile previous, IndexFile current) {
@@ -1032,18 +1000,20 @@ TEST_SUITE("query") {
     IndexFile previous("foo.cc", "<empty>");
     IndexFile current("foo.cc", "<empty>");
 
-    previous.Resolve(previous.ToTypeId(HashUsr("usr1")))
-        ->def.definition_spelling = Range(Position(1, 0));
-    previous.Resolve(previous.ToFuncId(HashUsr("usr2")))
-        ->def.definition_spelling = Range(Position(2, 0));
-    previous.Resolve(previous.ToVarId(HashUsr("usr3")))
-        ->def.definition_spelling = Range(Position(3, 0));
+    previous.Resolve(previous.ToTypeId(HashUsr("usr1")))->def.spell =
+        Use(Range(Position(1, 0)), {}, {}, {}, {});
+    previous.Resolve(previous.ToFuncId(HashUsr("usr2")))->def.spell =
+        Use(Range(Position(2, 0)), {}, {}, {}, {});
+    previous.Resolve(previous.ToVarId(HashUsr("usr3")))->def.spell =
+        Use(Range(Position(3, 0)), {}, {}, {}, {});
 
     IndexUpdate update = GetDelta(previous, current);
 
     REQUIRE(update.types_removed == std::vector<Usr>{HashUsr("usr1")});
-    REQUIRE(update.funcs_removed == std::vector<Usr>{HashUsr("usr2")});
-    REQUIRE(update.vars_removed == std::vector<Usr>{HashUsr("usr3")});
+    REQUIRE(update.funcs_removed.size() == 1);
+    REQUIRE(update.funcs_removed[0].usr == HashUsr("usr2"));
+    REQUIRE(update.vars_removed.size() == 1);
+    REQUIRE(update.vars_removed[0].usr == HashUsr("usr3"));
   }
 
   TEST_CASE("do not remove ref-only defs") {
@@ -1051,18 +1021,17 @@ TEST_SUITE("query") {
     IndexFile current("foo.cc", "<empty>");
 
     previous.Resolve(previous.ToTypeId(HashUsr("usr1")))
-        ->uses.push_back(Reference{Range(Position(1, 0))});
+        ->uses.push_back(Use{Range(Position(1, 0)), {}, {}, {}, {}});
     previous.Resolve(previous.ToFuncId(HashUsr("usr2")))
-        ->callers.push_back(IndexFuncRef(Range(Position(2, 0)), Id<void>(0),
-                                         SymbolKind::Func, SymbolRole::None));
+        ->uses.push_back(Use(Range(Position(2, 0)), {}, {}, {}, {}));
     previous.Resolve(previous.ToVarId(HashUsr("usr3")))
-        ->uses.push_back(Reference{Range(Position(3, 0))});
+        ->uses.push_back(Use(Range(Position(3, 0)), {}, {}, {}, {}));
 
     IndexUpdate update = GetDelta(previous, current);
 
     REQUIRE(update.types_removed == std::vector<Usr>{});
-    REQUIRE(update.funcs_removed == std::vector<Usr>{});
-    REQUIRE(update.vars_removed == std::vector<Usr>{});
+    REQUIRE(update.funcs_removed.empty());
+    REQUIRE(update.vars_removed.empty());
   }
 
   TEST_CASE("func callers") {
@@ -1072,22 +1041,18 @@ TEST_SUITE("query") {
     IndexFunc* pf = previous.Resolve(previous.ToFuncId(HashUsr("usr")));
     IndexFunc* cf = current.Resolve(current.ToFuncId(HashUsr("usr")));
 
-    pf->callers.push_back(IndexFuncRef(Range(Position(1, 0)), Id<void>(0),
-                                       SymbolKind::Func, SymbolRole::None));
-    cf->callers.push_back(IndexFuncRef(Range(Position(2, 0)), Id<void>(0),
-                                       SymbolKind::Func, SymbolRole::None));
+    pf->uses.push_back(Use(Range(Position(1, 0)), {}, {}, {}, {}));
+    cf->uses.push_back(Use(Range(Position(2, 0)), {}, {}, {}, {}));
 
     IndexUpdate update = GetDelta(previous, current);
 
-    REQUIRE(update.funcs_removed == std::vector<Usr>{});
-    REQUIRE(update.funcs_callers.size() == 1);
-    REQUIRE(update.funcs_callers[0].id == QueryFuncId(0));
-    REQUIRE(update.funcs_callers[0].to_remove.size() == 1);
-    REQUIRE(update.funcs_callers[0].to_remove[0].range ==
-            Range(Position(1, 0)));
-    REQUIRE(update.funcs_callers[0].to_add.size() == 1);
-    REQUIRE(update.funcs_callers[0].to_add[0].range ==
-            Range(Position(2, 0)));
+    REQUIRE(update.funcs_removed.empty());
+    REQUIRE(update.funcs_uses.size() == 1);
+    REQUIRE(update.funcs_uses[0].id == QueryFuncId(0));
+    REQUIRE(update.funcs_uses[0].to_remove.size() == 1);
+    REQUIRE(update.funcs_uses[0].to_remove[0].range == Range(Position(1, 0)));
+    REQUIRE(update.funcs_uses[0].to_add.size() == 1);
+    REQUIRE(update.funcs_uses[0].to_add[0].range == Range(Position(2, 0)));
   }
 
   TEST_CASE("type usages") {
@@ -1097,8 +1062,8 @@ TEST_SUITE("query") {
     IndexType* pt = previous.Resolve(previous.ToTypeId(HashUsr("usr")));
     IndexType* ct = current.Resolve(current.ToTypeId(HashUsr("usr")));
 
-    pt->uses.push_back(Reference{Range(Position(1, 0))});
-    ct->uses.push_back(Reference{Range(Position(2, 0))});
+    pt->uses.push_back(Use(Range(Position(1, 0)), {}, {}, {}, {}));
+    ct->uses.push_back(Use(Range(Position(2, 0)), {}, {}, {}, {}));
 
     IndexUpdate update = GetDelta(previous, current);
 
@@ -1117,14 +1082,10 @@ TEST_SUITE("query") {
 
     IndexFunc* pf = previous.Resolve(previous.ToFuncId(HashUsr("usr")));
     IndexFunc* cf = current.Resolve(current.ToFuncId(HashUsr("usr")));
-    pf->callers.push_back(IndexFuncRef(Range(Position(1, 0)), Id<void>(0),
-                                       SymbolKind::Func, SymbolRole::None));
-    pf->callers.push_back(IndexFuncRef(Range(Position(2, 0)), Id<void>(0),
-                                       SymbolKind::Func, SymbolRole::None));
-    cf->callers.push_back(IndexFuncRef(Range(Position(4, 0)), Id<void>(0),
-                                       SymbolKind::Func, SymbolRole::None));
-    cf->callers.push_back(IndexFuncRef(Range(Position(5, 0)), Id<void>(0),
-                                       SymbolKind::Func, SymbolRole::None));
+    pf->uses.push_back(Use(Range(Position(1, 0)), {}, {}, {}, {}));
+    pf->uses.push_back(Use(Range(Position(2, 0)), {}, {}, {}, {}));
+    cf->uses.push_back(Use(Range(Position(4, 0)), {}, {}, {}, {}));
+    cf->uses.push_back(Use(Range(Position(5, 0)), {}, {}, {}, {}));
 
     QueryDatabase db;
     IdMap previous_map(&db, previous.id_cache);
@@ -1137,13 +1098,143 @@ TEST_SUITE("query") {
         &previous_map, &current_map, &previous, &current);
 
     db.ApplyIndexUpdate(&import_update);
-    REQUIRE(db.funcs[0].callers.size() == 2);
-    REQUIRE(db.funcs[0].callers[0].range == Range(Position(1, 0)));
-    REQUIRE(db.funcs[0].callers[1].range == Range(Position(2, 0)));
+    REQUIRE(db.funcs[0].uses.size() == 2);
+    REQUIRE(db.funcs[0].uses[0].range == Range(Position(1, 0)));
+    REQUIRE(db.funcs[0].uses[1].range == Range(Position(2, 0)));
 
     db.ApplyIndexUpdate(&delta_update);
-    REQUIRE(db.funcs[0].callers.size() == 2);
-    REQUIRE(db.funcs[0].callers[0].range == Range(Position(4, 0)));
-    REQUIRE(db.funcs[0].callers[1].range == Range(Position(5, 0)));
+    REQUIRE(db.funcs[0].uses.size() == 2);
+    REQUIRE(db.funcs[0].uses[0].range == Range(Position(4, 0)));
+    REQUIRE(db.funcs[0].uses[1].range == Range(Position(5, 0)));
+  }
+
+  TEST_CASE("Remove variable with usage") {
+    auto load_index_from_json = [](const char* json) {
+      return Deserialize(SerializeFormat::Json, "foo.cc", json, "<empty>",
+                         nullopt);
+    };
+
+    auto previous = load_index_from_json(R"RAW(
+{
+  "types": [
+    {
+      "id": 0,
+      "usr": 17,
+      "detailed_name": "",
+      "short_name_offset": 0,
+      "short_name_size": 0,
+      "kind": 0,
+      "hover": "",
+      "comments": "",
+      "parents": [],
+      "derived": [],
+      "types": [],
+      "funcs": [],
+      "vars": [],
+      "instances": [
+        0
+      ],
+      "uses": []
+    }
+  ],
+  "funcs": [
+    {
+      "id": 0,
+      "usr": 4259594751088586730,
+      "detailed_name": "void foo()",
+      "short_name_offset": 5,
+      "short_name_size": 3,
+      "kind": 12,
+      "storage": 1,
+      "hover": "",
+      "comments": "",
+      "declarations": [],
+      "spell": "1:6-1:9|-1|1|2",
+      "extent": "1:1-4:2|-1|1|0",
+      "base": [],
+      "derived": [],
+      "locals": [],
+      "uses": [],
+      "callees": []
+    }
+  ],
+  "vars": [
+    {
+      "id": 0,
+      "usr": 16837348799350457167,
+      "detailed_name": "int a",
+      "short_name_offset": 4,
+      "short_name_size": 1,
+      "hover": "",
+      "comments": "",
+      "declarations": [],
+      "spell": "2:7-2:8|0|3|2",
+      "extent": "2:3-2:8|0|3|2",
+      "type": 0,
+      "uses": [
+        "3:3-3:4|0|3|4"
+      ],
+      "kind": 13,
+      "storage": 1
+    }
+  ]
+}
+    )RAW");
+
+    auto current = load_index_from_json(R"RAW(
+{
+  "types": [],
+  "funcs": [
+    {
+      "id": 0,
+      "usr": 4259594751088586730,
+      "detailed_name": "void foo()",
+      "short_name_offset": 5,
+      "short_name_size": 3,
+      "kind": 12,
+      "storage": 1,
+      "hover": "",
+      "comments": "",
+      "declarations": [],
+      "spell": "1:6-1:9|-1|1|2",
+      "extent": "1:1-5:2|-1|1|0",
+      "base": [],
+      "derived": [],
+      "locals": [],
+      "uses": [],
+      "callees": []
+    }
+  ],
+  "vars": []
+}
+    )RAW");
+
+    // Validate previous/current were parsed.
+    REQUIRE(previous->vars.size() == 1);
+    REQUIRE(current->vars.size() == 0);
+
+    QueryDatabase db;
+
+    // Apply initial file.
+    {
+      IdMap previous_map(&db, previous->id_cache);
+      IndexUpdate import_update = IndexUpdate::CreateDelta(
+          nullptr, &previous_map, nullptr, previous.get());
+      db.ApplyIndexUpdate(&import_update);
+    }
+
+    REQUIRE(db.vars.size() == 1);
+    REQUIRE(db.vars[0].uses.size() == 1);
+
+    // Apply change.
+    {
+      IdMap previous_map(&db, previous->id_cache);
+      IdMap current_map(&db, current->id_cache);
+      IndexUpdate delta_update = IndexUpdate::CreateDelta(
+          &previous_map, &current_map, previous.get(), current.get());
+      db.ApplyIndexUpdate(&delta_update);
+    }
+    REQUIRE(db.vars.size() == 1);
+    REQUIRE(db.vars[0].uses.size() == 0);
   }
 }

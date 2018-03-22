@@ -5,7 +5,7 @@
 #include <loguru.hpp>
 
 #include <climits>
-#include <queue>
+#include <unordered_set>
 
 namespace {
 
@@ -16,101 +16,67 @@ int ComputeRangeSize(const Range& range) {
   return range.end.column - range.start.column;
 }
 
+template <typename Q>
+std::vector<Use> GetDeclarations(std::vector<Q>& entities,
+                                 const std::vector<Id<Q>>& ids) {
+  std::vector<Use> ret;
+  ret.reserve(ids.size());
+  for (auto id : ids) {
+    Q& entity = entities[id.id];
+    bool has_def = false;
+    for (auto& def : entity.def)
+      if (def.spell) {
+        ret.push_back(*def.spell);
+        has_def = true;
+        break;
+      }
+    if (!has_def && entity.declarations.size())
+      ret.push_back(entity.declarations[0]);
+  }
+  return ret;
+}
+
 }  // namespace
 
-Maybe<Reference> GetDefinitionSpellingOfSymbol(QueryDatabase* db,
-                                               QueryFuncId id) {
-  QueryFunc& func = db->funcs[id.id];
-  if (func.def)
-    return func.def->definition_spelling;
-  return nullopt;
+Maybe<Use> GetDefinitionSpell(QueryDatabase* db, SymbolIdx sym) {
+  Maybe<Use> ret;
+  EachEntityDef(db, sym, [&](const auto& def) { return !(ret = def.spell); });
+  return ret;
 }
 
-Maybe<Reference> GetDefinitionSpellingOfSymbol(QueryDatabase* db,
-                                               SymbolRef sym) {
-  switch (sym.kind) {
-    case SymbolKind::Type: {
-      QueryType& type = db->GetType(sym);
-      if (type.def)
-        return *type.def->definition_spelling;
-      break;
-    }
-    case SymbolKind::Func: {
-      QueryFunc& func = db->GetFunc(sym);
-      if (func.def)
-        return func.def->definition_spelling;
-      break;
-    }
-    case SymbolKind::Var: {
-      QueryVar& var = db->GetVar(sym);
-      if (var.def)
-        return var.def->definition_spelling;
-      break;
-    }
-    case SymbolKind::File:
-    case SymbolKind::Invalid: {
-      assert(false && "unexpected");
-      break;
-    }
-  }
-  return nullopt;
-}
-
-Maybe<Reference> GetDefinitionExtentOfSymbol(QueryDatabase* db, SymbolRef sym) {
-  switch (sym.kind) {
-    case SymbolKind::Type: {
-      QueryType& type = db->GetType(sym);
-      if (type.def)
-        return type.def->definition_extent;
-      break;
-    }
-    case SymbolKind::Func: {
-      QueryFunc& func = db->GetFunc(sym);
-      if (func.def)
-        return func.def->definition_extent;
-      break;
-    }
-    case SymbolKind::Var: {
-      QueryVar& var = db->GetVar(sym);
-      if (var.def)
-        return var.def->definition_extent;
-      break;
-    }
-    case SymbolKind::File:
-      return sym;
-    case SymbolKind::Invalid: {
-      assert(false && "unexpected");
-      break;
-    }
-  }
-  return nullopt;
+Maybe<Use> GetDefinitionExtent(QueryDatabase* db, SymbolIdx sym) {
+  // Used to jump to file.
+  if (sym.kind == SymbolKind::File)
+    return Use(Range(Position(0, 0), Position(0, 0)), sym.id, sym.kind,
+               Role::None, QueryFileId(sym.id));
+  Maybe<Use> ret;
+  EachEntityDef(db, sym, [&](const auto& def) { return !(ret = def.extent); });
+  return ret;
 }
 
 Maybe<QueryFileId> GetDeclarationFileForSymbol(QueryDatabase* db,
-                                               SymbolRef sym) {
+                                               SymbolIdx sym) {
   switch (sym.kind) {
-    case SymbolKind::Type: {
-      QueryType& type = db->GetType(sym);
-      if (type.def && type.def->definition_spelling)
-        return db->GetFileId(*type.def->definition_spelling);
-      break;
-    }
+    case SymbolKind::File:
+      return QueryFileId(sym.id);
     case SymbolKind::Func: {
       QueryFunc& func = db->GetFunc(sym);
       if (!func.declarations.empty())
-        return db->GetFileId(func.declarations[0]);
-      if (func.def && func.def->definition_spelling)
-        return db->GetFileId(*func.def->definition_spelling);
+        return func.declarations[0].file;
+      if (const auto* def = func.AnyDef())
+        return def->file;
+      break;
+    }
+    case SymbolKind::Type: {
+      if (const auto* def = db->GetType(sym).AnyDef())
+        return def->file;
       break;
     }
     case SymbolKind::Var: {
-      QueryVar& var = db->GetVar(sym);
-      if (var.def && var.def->definition_spelling)
-        return db->GetFileId(*var.def->definition_spelling);
+      if (const auto* def = db->GetVar(sym).AnyDef())
+        return def->file;
       break;
     }
-    case SymbolKind::File:
-      return QueryFileId(sym.Idx());
     case SymbolKind::Invalid: {
       assert(false && "unexpected");
       break;
@@ -119,205 +85,74 @@ Maybe<QueryFileId> GetDeclarationFileForSymbol(QueryDatabase* db,
   return nullopt;
 }
 
-std::vector<Reference> ToReference(QueryDatabase* db,
-                                   const std::vector<QueryFuncRef>& refs) {
-  std::vector<Reference> ret;
-  ret.reserve(refs.size());
-  for (auto& ref : refs)
-    ret.push_back(ref);
-  return ret;
+std::vector<Use> GetDeclarations(QueryDatabase* db,
+                                 const std::vector<QueryFuncId>& ids) {
+  return GetDeclarations(db->funcs, ids);
 }
 
-std::vector<Reference> ToReference(QueryDatabase* db,
-                                   const std::vector<QueryFuncId>& ids) {
-  std::vector<Reference> ret;
-  ret.reserve(ids.size());
-  for (auto id : ids) {
-    QueryFunc& func = db->funcs[id.id];
-    if (func.def && func.def->definition_spelling)
-      ret.push_back(*func.def->definition_spelling);
-    else if (func.declarations.size())
-      ret.push_back(func.declarations[0]);
-  }
-  return ret;
+std::vector<Use> GetDeclarations(QueryDatabase* db,
+                                 const std::vector<QueryTypeId>& ids) {
+  return GetDeclarations(db->types, ids);
 }
 
-std::vector<Reference> ToReference(QueryDatabase* db,
-                                   const std::vector<QueryTypeId>& ids) {
-  std::vector<Reference> ret;
-  ret.reserve(ids.size());
-  for (auto id : ids) {
-    QueryType& type = db->types[id.id];
-    if (type.def && type.def->definition_spelling)
-      ret.push_back(*type.def->definition_spelling);
-  }
-  return ret;
+std::vector<Use> GetDeclarations(QueryDatabase* db,
+                                 const std::vector<QueryVarId>& ids) {
+  return GetDeclarations(db->vars, ids);
 }
 
-std::vector<Reference> ToReference(QueryDatabase* db,
-                                   const std::vector<QueryVarId>& ids) {
-  std::vector<Reference> ret;
-  ret.reserve(ids.size());
-  for (auto id : ids) {
-    QueryVar& var = db->vars[id.id];
-    if (var.def && var.def->definition_spelling)
-      ret.push_back(*var.def->definition_spelling);
-    else if (var.declarations.size())
-      ret.push_back(var.declarations[0]);
-  }
-  return ret;
-}
-
-std::vector<Reference> GetUsesOfSymbol(QueryDatabase* db,
-                                       SymbolRef sym,
-                                       bool include_decl) {
+std::vector<Use> GetNonDefDeclarations(QueryDatabase* db, SymbolIdx sym) {
   switch (sym.kind) {
-    case SymbolKind::Type: {
-      QueryType& type = db->types[sym.Idx()];
-      std::vector<Reference> ret = type.uses;
-      if (include_decl && type.def && type.def->definition_spelling)
-        ret.push_back(*type.def->definition_spelling);
-      return ret;
-    }
-    case SymbolKind::Func: {
-      // TODO: the vector allocation could be avoided.
-      QueryFunc& func = db->funcs[sym.Idx()];
-      std::vector<Reference> ret = ToReference(db, func.callers);
-      if (include_decl) {
-        AddRange(&ret, func.declarations);
-        if (func.def && func.def->definition_spelling)
-          ret.push_back(*func.def->definition_spelling);
-      }
-      return ret;
-    }
-    case SymbolKind::Var: {
-      QueryVar& var = db->vars[sym.Idx()];
-      std::vector<Reference> ret = var.uses;
-      if (include_decl) {
-        if (var.def && var.def->definition_spelling)
-          ret.push_back(*var.def->definition_spelling);
-        ret.insert(ret.end(), var.declarations.begin(), var.declarations.end());
-      }
-      return ret;
-    }
-    case SymbolKind::File:
-    case SymbolKind::Invalid: {
-      assert(false && "unexpected");
-      return {};
-    }
-  }
-}
-
-std::vector<Reference> GetDeclarationsOfSymbolForGotoDefinition(
-    QueryDatabase* db,
-    SymbolRef sym) {
-  switch (sym.kind) {
-    case SymbolKind::Type: {
-      // Returning the definition spelling of a type is a hack (and is why the
-      // function has the postfix `ForGotoDefintion`, but it lets the user
-      // jump to the start of a type if clicking goto-definition on the same
-      // type from within the type definition.
-      QueryType& type = db->GetType(sym);
-      if (type.def) {
-        Maybe<Reference> def = type.def->definition_spelling;
-        if (def)
-          return {*def};
-      }
-      break;
-    }
     case SymbolKind::Func:
       return db->GetFunc(sym).declarations;
+    case SymbolKind::Type:
+      return db->GetType(sym).declarations;
     case SymbolKind::Var:
       return db->GetVar(sym).declarations;
     default:
-      break;
+      return {};
   }
-
-  return {};
 }
 
-bool HasCallersOnSelfOrBaseOrDerived(QueryDatabase* db, QueryFunc& root) {
-  // Check self.
-  if (!root.callers.empty())
-    return true;
-
-  // Check for base calls.
-  std::queue<QueryFunc*> queue;
-  EachWithGen<QueryFunc>(db->funcs, root.def->base, [&](QueryFunc& func) {
-    queue.push(&func);
-  });
-  while (!queue.empty()) {
-    QueryFunc& func = *queue.front();
-    queue.pop();
-    if (!func.callers.empty())
-      return true;
-    if (func.def)
-      EachWithGen<QueryFunc>(db->funcs, func.def->base, [&](QueryFunc& func1) {
-        queue.push(&func1);
+std::vector<Use> GetUsesForAllBases(QueryDatabase* db, QueryFunc& root) {
+  std::vector<Use> ret;
+  std::vector<QueryFunc*> stack{&root};
+  std::unordered_set<Usr> seen;
+  seen.insert(root.usr);
+  while (!stack.empty()) {
+    QueryFunc& func = *stack.back();
+    stack.pop_back();
+    if (auto* def = func.AnyDef()) {
+      EachDefinedEntity(db->funcs, def->bases, [&](QueryFunc& func1) {
+        if (!seen.count(func1.usr)) {
+          seen.insert(func1.usr);
+          stack.push_back(&func1);
+          AddRange(&ret, func1.uses);
+        }
       });
+    }
   }
 
-  // Check for derived calls.
-  EachWithGen<QueryFunc>(db->funcs, root.derived, [&](QueryFunc& func1) {
-    queue.push(&func1);
-  });
-  while (!queue.empty()) {
-    QueryFunc& func = *queue.front();
-    queue.pop();
-    if (!func.callers.empty())
-      return true;
-    EachWithGen<QueryFunc>(db->funcs, func.derived, [&](QueryFunc& func1) {
-      queue.push(&func1);
+  return ret;
+}
+
+std::vector<Use> GetUsesForAllDerived(QueryDatabase* db, QueryFunc& root) {
+  std::vector<Use> ret;
+  std::vector<QueryFunc*> stack{&root};
+  std::unordered_set<Usr> seen;
+  seen.insert(root.usr);
+  while (!stack.empty()) {
+    QueryFunc& func = *stack.back();
+    stack.pop_back();
+    EachDefinedEntity(db->funcs, func.derived, [&](QueryFunc& func1) {
+      if (!seen.count(func1.usr)) {
+        seen.insert(func1.usr);
+        stack.push_back(&func1);
+        AddRange(&ret, func1.uses);
+      }
     });
   }
 
-  return false;
-}
-
-std::vector<QueryFuncRef> GetCallersForAllBaseFunctions(QueryDatabase* db,
-                                                        QueryFunc& root) {
-  std::vector<QueryFuncRef> callers;
-  if (!root.def)
-    return callers;
-
-  std::queue<QueryFunc*> queue;
-  EachWithGen<QueryFunc>(db->funcs, root.def->base, [&](QueryFunc& func1) {
-    queue.push(&func1);
-  });
-  while (!queue.empty()) {
-    QueryFunc& func = *queue.front();
-    queue.pop();
-
-    AddRange(&callers, func.callers);
-    if (func.def)
-      EachWithGen<QueryFunc>(db->funcs, func.def->base, [&](QueryFunc& func1) {
-        queue.push(&func1);
-      });
-  }
-
-  return callers;
-}
-
-std::vector<QueryFuncRef> GetCallersForAllDerivedFunctions(QueryDatabase* db,
-                                                           QueryFunc& root) {
-  std::vector<QueryFuncRef> callers;
-
-  std::queue<QueryFunc*> queue;
-  EachWithGen<QueryFunc>(db->funcs, root.derived, [&](QueryFunc& func) {
-    queue.push(&func);
-  });
-
-  while (!queue.empty()) {
-    QueryFunc& func = *queue.front();
-    queue.pop();
-
-    EachWithGen<QueryFunc>(db->funcs, func.derived, [&](QueryFunc& func1) {
-      queue.push(&func1);
-    });
-    AddRange(&callers, func.callers);
-  }
-
-  return callers;
+  return ret;
 }
 
 optional<lsPosition> GetLsPosition(WorkingFile* working_file,
@@ -326,12 +161,10 @@ optional<lsPosition> GetLsPosition(WorkingFile* working_file,
     return lsPosition(position.line, position.column);
 
   int column = position.column;
-  optional<int> start =
-      working_file->GetBufferPosFromIndexPos(position.line, &column, false);
-  if (!start)
-    return nullopt;
-
-  return lsPosition(*start, column);
+  if (optional<int> start =
+          working_file->GetBufferPosFromIndexPos(position.line, &column, false))
+    return lsPosition(*start, column);
+  return nullopt;
 }
 
 optional<lsRange> GetLsRange(WorkingFile* working_file, const Range& location) {
@@ -387,46 +220,77 @@ lsDocumentUri GetLsDocumentUri(QueryDatabase* db, QueryFileId file_id) {
 
 optional<lsLocation> GetLsLocation(QueryDatabase* db,
                                    WorkingFiles* working_files,
-                                   Reference ref) {
+                                   Use use) {
   std::string path;
-  QueryFileId file_id = db->GetFileId(ref);
-  if (!file_id.HasValue())
-    return nullopt;
-  lsDocumentUri uri = GetLsDocumentUri(db, file_id, &path);
+  lsDocumentUri uri = GetLsDocumentUri(db, use.file, &path);
   optional<lsRange> range =
-      GetLsRange(working_files->GetFileByFilename(path), ref.range);
+      GetLsRange(working_files->GetFileByFilename(path), use.range);
   if (!range)
     return nullopt;
   return lsLocation(uri, *range);
 }
 
-std::vector<lsLocation> GetLsLocations(
-    QueryDatabase* db,
-    WorkingFiles* working_files,
-    const std::vector<Reference>& refs) {
-  std::unordered_set<lsLocation> unique_locations;
-  for (Reference ref : refs) {
-    optional<lsLocation> location =
-        GetLsLocation(db, working_files, ref);
-    if (!location)
-      continue;
-    unique_locations.insert(*location);
+optional<lsLocationEx> GetLsLocationEx(QueryDatabase* db,
+                                       WorkingFiles* working_files,
+                                       Use use,
+                                       bool container) {
+  optional<lsLocation> ls_loc = GetLsLocation(db, working_files, use);
+  if (!ls_loc)
+    return nullopt;
+  lsLocationEx ret;
+  ret.lsLocation::operator=(*ls_loc);
+  if (container) {
+    ret.role = uint16_t(use.role);
+    EachEntityDef(db, use, [&](const auto& def) {
+      ret.containerName = std::string_view(def.detailed_name);
+      return false;
+    });
   }
+  return ret;
+}
 
-  std::vector<lsLocation> result;
-  result.reserve(unique_locations.size());
-  result.assign(unique_locations.begin(), unique_locations.end());
-  return result;
+std::vector<lsLocationEx> GetLsLocationExs(QueryDatabase* db,
+                                           WorkingFiles* working_files,
+                                           const std::vector<Use>& uses,
+                                           bool container,
+                                           int limit) {
+  std::vector<lsLocationEx> ret;
+  for (Use use : uses)
+    if (auto loc = GetLsLocationEx(db, working_files, use, container))
+      ret.push_back(*loc);
+  std::sort(ret.begin(), ret.end());
+  ret.erase(std::unique(ret.begin(), ret.end()), ret.end());
+  if (ret.size() > limit)
+    ret.resize(limit);
+  return ret;
+}
+
+lsSymbolKind GetSymbolKind(QueryDatabase* db, SymbolIdx sym) {
+  lsSymbolKind ret;
+  if (sym.kind == SymbolKind::File)
+    ret = lsSymbolKind::File;
+  else {
+    ret = lsSymbolKind::Unknown;
+    WithEntity(db, sym, [&](const auto& entity) {
+      for (auto& def : entity.def) {
+        ret = def.kind;
+        break;
+      }
+    });
+  }
+  return ret;
 }
 
 // Returns a symbol. The symbol will have *NOT* have a location assigned.
 optional<lsSymbolInformation> GetSymbolInfo(QueryDatabase* db,
                                             WorkingFiles* working_files,
-                                            SymbolRef sym,
+                                            SymbolIdx sym,
                                             bool use_short_name) {
   switch (sym.kind) {
+    case SymbolKind::Invalid:
+      break;
     case SymbolKind::File: {
-      QueryFile& file = db->files[sym.Idx()];
+      QueryFile& file = db->GetFile(sym);
       if (!file.def)
         break;
 
@@ -435,72 +299,24 @@ optional<lsSymbolInformation> GetSymbolInfo(QueryDatabase* db,
       info.kind = lsSymbolKind::File;
       return info;
     }
-    case SymbolKind::Type: {
-      QueryType& type = db->GetType(sym);
-      if (!type.def)
-        break;
-
+    default: {
       lsSymbolInformation info;
-      if (use_short_name)
-        info.name = type.def->ShortName();
-      else
-        info.name = type.def->detailed_name;
-      if (type.def->detailed_name != type.def->ShortName())
-        info.containerName = type.def->detailed_name;
-      // TODO ClangSymbolKind -> lsSymbolKind
-      switch (type.def->kind) {
-        default:
-          info.kind = lsSymbolKind::Class;
-          break;
-        case ClangSymbolKind::Namespace:
-          info.kind = lsSymbolKind::Namespace;
-          break;
-      }
+      EachEntityDef(db, sym, [&](const auto& def) {
+        if (use_short_name)
+          info.name = def.ShortName();
+        else
+          info.name = def.detailed_name;
+        info.kind = def.kind;
+        info.containerName = def.detailed_name;
+        return false;
+      });
       return info;
     }
-    case SymbolKind::Func: {
-      QueryFunc& func = db->GetFunc(sym);
-      if (!func.def)
-        break;
-
-      lsSymbolInformation info;
-      if (use_short_name)
-        info.name = func.def->ShortName();
-      else
-        info.name = func.def->detailed_name;
-      info.containerName = func.def->detailed_name;
-      info.kind = lsSymbolKind::Function;
-
-      if (func.def->declaring_type.has_value()) {
-        QueryType& container = db->types[func.def->declaring_type->id];
-        if (container.def)
-          info.kind = lsSymbolKind::Method;
-      }
-
-      return info;
-    }
-    case SymbolKind::Var: {
-      QueryVar& var = db->GetVar(sym);
-      if (!var.def)
-        break;
-
-      lsSymbolInformation info;
-      if (use_short_name)
-        info.name = var.def->ShortName();
-      else
-        info.name = var.def->detailed_name;
-      info.containerName = var.def->detailed_name;
-      info.kind = lsSymbolKind::Variable;
-      return info;
-    }
-    case SymbolKind::Invalid:
-      break;
   }
 
   return nullopt;
 }
 
-// TODO Sort only by range length, not |kind| or |idx|
 std::vector<SymbolRef> FindSymbolsAtLocation(WorkingFile* working_file,
                                              QueryFile* file,
                                              lsPosition position) {
@@ -534,33 +350,18 @@ std::vector<SymbolRef> FindSymbolsAtLocation(WorkingFile* working_file,
   // better on constructors.
   std::sort(symbols.begin(), symbols.end(),
             [](const SymbolRef& a, const SymbolRef& b) {
-              int a_size = ComputeRangeSize(a.range);
-              int b_size = ComputeRangeSize(b.range);
-
-              if (a_size != b_size)
-                return a_size < b_size;
-              // operator> orders Var/Func before Type.
-              int t = static_cast<int>(a.kind) - static_cast<int>(b.kind);
+              int t = ComputeRangeSize(a.range) - ComputeRangeSize(b.range);
+              if (t)
+                return t < 0;
+              t = (a.role & Role::Definition) - (b.role & Role::Definition);
               if (t)
                 return t > 0;
-              return a.Idx() < b.Idx();
+              // operator> orders Var/Func before Type.
+              t = static_cast<int>(a.kind) - static_cast<int>(b.kind);
+              if (t)
+                return t > 0;
+              return a.id < b.id;
             });
 
   return symbols;
-}
-
-void EmitDiagnostics(WorkingFiles* working_files,
-                     std::string path,
-                     std::vector<lsDiagnostic> diagnostics) {
-  // Emit diagnostics.
-  Out_TextDocumentPublishDiagnostics out;
-  out.params.uri = lsDocumentUri::FromPath(path);
-  out.params.diagnostics = diagnostics;
-  QueueManager::WriteStdout(IpcId::TextDocumentPublishDiagnostics, out);
-
-  // Cache diagnostics so we can show fixits.
-  working_files->DoActionOnFile(path, [&](WorkingFile* working_file) {
-    if (working_file)
-      working_file->diagnostics_ = diagnostics;
-  });
 }

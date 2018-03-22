@@ -1,6 +1,7 @@
 #pragma once
 
 #include "maybe.h"
+#include "nt_string.h"
 #include "port.h"
 
 #include <macro_map.h>
@@ -127,8 +128,11 @@ struct IndexFile;
 void Reflect(Reader& visitor, uint8_t& value);
 void Reflect(Writer& visitor, uint8_t& value);
 
-void Reflect(Reader& visitor, int16_t& value);
-void Reflect(Writer& visitor, int16_t& value);
+void Reflect(Reader& visitor, short& value);
+void Reflect(Writer& visitor, short& value);
+
+void Reflect(Reader& visitor, unsigned short& value);
+void Reflect(Writer& visitor, unsigned short& value);
 
 void Reflect(Reader& visitor, int& value);
 void Reflect(Writer& visitor, int& value);
@@ -160,8 +164,8 @@ void Reflect(Writer& visitor, std::string& value);
 void Reflect(Reader& visitor, std::string_view& view);
 void Reflect(Writer& visitor, std::string_view& view);
 
-void Reflect(Reader& visitor, std::unique_ptr<char[]>& value);
-void Reflect(Writer& visitor, std::unique_ptr<char[]>& value);
+void Reflect(Reader& visitor, NtString& value);
+void Reflect(Writer& visitor, NtString& value);
 
 // std::monostate is used to represent JSON null
 void Reflect(Reader& visitor, std::monostate&);
@@ -228,7 +232,7 @@ void ReflectMember(Writer& visitor, const char* name, optional<T>& value) {
 // The same as std::optional
 template <typename T>
 void ReflectMember(Writer& visitor, const char* name, Maybe<T>& value) {
-  if (value.has_value() || visitor.Format() != SerializeFormat::Json) {
+  if (value.HasValue() || visitor.Format() != SerializeFormat::Json) {
     visitor.Key(name);
     Reflect(visitor, value);
   }
@@ -354,10 +358,11 @@ void ReflectMember(Writer& visitor, const char* name, T& value) {
 // API
 
 std::string Serialize(SerializeFormat format, IndexFile& file);
-std::unique_ptr<IndexFile> Deserialize(SerializeFormat format,
-                                       const std::string& path,
-                                       const std::string& serialized_index_content,
-                                       const std::string& file_content,
-                                       optional<int> expected_version);
+std::unique_ptr<IndexFile> Deserialize(
+    SerializeFormat format,
+    const std::string& path,
+    const std::string& serialized_index_content,
+    const std::string& file_content,
+    optional<int> expected_version);
 
 void SetTestOutputMode();

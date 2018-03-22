@@ -29,6 +29,9 @@ struct LruCache {
   template <typename TFunc>
   void IterateValues(TFunc func);
 
+  // Empties the cache
+  void Clear(void);
+
  private:
   // There is a global score counter, when we access an element we increase
   // its score to the current global value, so it has the highest overall
@@ -95,7 +98,7 @@ std::shared_ptr<TValue> LruCache<TKey, TValue>::TryTake(const TKey& key) {
 template <typename TKey, typename TValue>
 void LruCache<TKey, TValue>::Insert(const TKey& key,
                                     const std::shared_ptr<TValue>& value) {
-  if (entries_.size() >= max_entries_)
+  if ((int)entries_.size() >= max_entries_)
     entries_.erase(std::min_element(entries_.begin(), entries_.end()));
 
   Entry entry;
@@ -123,4 +126,10 @@ void LruCache<TKey, TValue>::IncrementScore() {
     for (Entry& entry : entries_)
       entry.score = next_score_++;
   }
+}
+
+template <typename TKey, typename TValue>
+void LruCache<TKey, TValue>::Clear(void) {
+	entries_.clear();
+	next_score_ = 0;
 }

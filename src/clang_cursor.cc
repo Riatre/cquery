@@ -21,22 +21,12 @@ Range ResolveCXSourceRange(const CXSourceRange& range, CXFile* cx_file) {
                Position((int16_t)end_line - 1, (int16_t)end_column - 1));
 }
 
-// TODO Place this global variable into config
-extern int g_index_comments;
-
 ClangType::ClangType() : cx_type() {}
 
 ClangType::ClangType(const CXType& other) : cx_type(other) {}
 
 bool ClangType::operator==(const ClangType& rhs) const {
   return clang_equalTypes(cx_type, rhs.cx_type);
-}
-
-bool ClangType::is_fundamental() const {
-  // NOTE: This will return false for pointed types. Should we call
-  //       strip_qualifiers for the user?
-  return cx_type.kind >= CXType_FirstBuiltin &&
-         cx_type.kind <= CXType_LastBuiltin;
 }
 
 ClangCursor ClangType::get_declaration() const {
@@ -48,7 +38,7 @@ std::string ClangType::get_usr() const {
 }
 
 Usr ClangType::get_usr_hash() const {
-  if (is_fundamental())
+  if (is_builtin())
     return static_cast<Usr>(cx_type.kind);
   return ClangCursor(clang_getTypeDeclaration(cx_type)).get_usr_hash();
 }
@@ -84,7 +74,7 @@ ClangType ClangType::strip_qualifiers() const {
   return cx;
 }
 
-std::string ClangType::get_spelling() const {
+std::string ClangType::get_spell_name() const {
   return ToString(clang_getTypeSpelling(cx_type));
 }
 
@@ -94,6 +84,8 @@ ClangType ClangType::get_return_type() const {
 
 std::vector<ClangType> ClangType::get_arguments() const {
   int size = clang_getNumArgTypes(cx_type);
+  if (size < 0)
+    return {};
   std::vector<ClangType> types(size);
   for (int i = 0; i < size; ++i)
     types.emplace_back(clang_getArgType(cx_type, i));
@@ -139,11 +131,11 @@ ClangType ClangCursor::get_type() const {
   return ClangType(clang_getCursorType(cx_cursor));
 }
 
-std::string ClangCursor::get_spelling() const {
+std::string ClangCursor::get_spell_name() const {
   return ::ToString(clang_getCursorSpelling(cx_cursor));
 }
 
-Range ClangCursor::get_spelling_range(CXFile* cx_file) const {
+Range ClangCursor::get_spell(CXFile* cx_file) const {
   // TODO for Objective-C methods and Objective-C message expressions, there are
   // multiple pieces for each selector identifier.
   CXSourceRange range = clang_Cursor_getSpellingNameRange(cx_cursor, 0, 0);
@@ -194,6 +186,10 @@ ClangCursor ClangCursor::get_definition() const {
   return ClangCursor(clang_getCursorDefinition(cx_cursor));
 }
 
+ClangCursor ClangCursor::get_lexical_parent() const {
+  return ClangCursor(clang_getCursorLexicalParent(cx_cursor));
+}
+
 ClangCursor ClangCursor::get_semantic_parent() const {
   return ClangCursor(clang_getCursorSemanticParent(cx_cursor));
 }
@@ -224,12 +220,10 @@ std::string ClangCursor::get_type_description() const {
   return ::ToString(clang_getTypeSpelling(type));
 }
 
-std::string ClangCursor::get_comments() const {
-  if (!g_index_comments)
-    return "";
+NtString ClangCursor::get_comments() const {
   CXSourceRange range = clang_Cursor_getCommentRange(cx_cursor);
   if (clang_Range_isNull(range))
-    return "";
+    return {};
 
   unsigned start_column;
   clang_getSpellingLocation(clang_getRangeStart(range), nullptr, nullptr,
@@ -282,9 +276,11 @@ std::string ClangCursor::get_comments() const {
   }
   while (ret.size() && isspace(ret.back()))
     ret.pop_back();
-  return ret;
+  if (ret.empty())
+    return {};
+  return static_cast<std::string_view>(ret);
 }
 
 std::string ClangCursor::ToString() const {
-  return ::ToString(get_kind()) + " " + get_spelling();
+  return ::ToString(get_kind()) + " " + get_spell_name();
 }

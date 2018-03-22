@@ -16,17 +16,15 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [{
-          "spelling": "1:6-1:9",
-          "extent": "1:1-1:11",
-          "content": "void foo()",
+          "spell": "1:6-1:9|-1|1|1",
           "param_spellings": []
         }],
-      "definition_spelling": "3:6-3:9",
-      "definition_extent": "3:1-3:14",
-      "base": [],
+      "spell": "3:6-3:9|-1|1|2",
+      "extent": "3:1-3:14|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
+      "vars": [],
+      "uses": [],
       "callees": []
     }],
   "vars": []

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "ipc.h"
-#include "language_server_api.h"
+#include "lsp.h"
+#include "method.h"
 #include "query.h"
 
 #include <optional.h>
@@ -12,6 +12,7 @@
 struct ClangCompleteManager;
 struct CodeCompleteCache;
 struct Config;
+class DiagnosticsEngine;
 struct FileConsumerSharedState;
 struct ImportManager;
 struct ImportPipelineStatus;
@@ -28,8 +29,8 @@ struct Out_CqueryPublishSemanticHighlighting
     : public lsOutMessage<Out_CqueryPublishSemanticHighlighting> {
   struct Symbol {
     int stableId = 0;
-    SymbolKind parentKind;
-    ClangSymbolKind kind;
+    lsSymbolKind parentKind;
+    lsSymbolKind kind;
     StorageClass storage;
     std::vector<lsRange> ranges;
   };
@@ -72,6 +73,7 @@ struct MessageHandler {
   QueryDatabase* db = nullptr;
   MultiQueueWaiter* waiter = nullptr;
   Project* project = nullptr;
+  DiagnosticsEngine* diag_engine = nullptr;
   FileConsumerSharedState* file_consumer_shared = nullptr;
   ImportManager* import_manager = nullptr;
   ImportPipelineStatus* import_pipeline_status = nullptr;
@@ -84,8 +86,8 @@ struct MessageHandler {
   CodeCompleteCache* non_global_code_complete_cache = nullptr;
   CodeCompleteCache* signature_cache = nullptr;
 
-  virtual IpcId GetId() const = 0;
-  virtual void Run(std::unique_ptr<BaseIpcMessage> message) = 0;
+  virtual MethodType GetMethodType() const = 0;
+  virtual void Run(std::unique_ptr<InMessage> message) = 0;
 
   static std::vector<MessageHandler*>* message_handlers;
 
@@ -98,9 +100,8 @@ struct BaseMessageHandler : MessageHandler {
   virtual void Run(TMessage* message) = 0;
 
   // MessageHandler:
-  IpcId GetId() const override { return TMessage::kIpcId; }
-  void Run(std::unique_ptr<BaseIpcMessage> message) override {
-    Run(message->As<TMessage>());
+  void Run(std::unique_ptr<InMessage> message) override {
+    Run(static_cast<TMessage*>(message.get()));
   }
 };
 

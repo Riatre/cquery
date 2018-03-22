@@ -8,6 +8,8 @@
 #include <loguru/loguru.hpp>
 
 namespace {
+MethodType kMethodType = "workspace/didChangeWatchedFiles";
+
 enum class lsFileChangeType {
   Created = 1,
   Changed = 2,
@@ -26,17 +28,17 @@ struct lsDidChangeWatchedFilesParams {
 };
 MAKE_REFLECT_STRUCT(lsDidChangeWatchedFilesParams, changes);
 
-struct Ipc_WorkspaceDidChangeWatchedFiles
-    : public NotificationMessage<Ipc_WorkspaceDidChangeWatchedFiles> {
-  const static IpcId kIpcId = IpcId::WorkspaceDidChangeWatchedFiles;
+struct In_WorkspaceDidChangeWatchedFiles : public NotificationInMessage {
+  MethodType GetMethodType() const override { return kMethodType; }
   lsDidChangeWatchedFilesParams params;
 };
-MAKE_REFLECT_STRUCT(Ipc_WorkspaceDidChangeWatchedFiles, params);
-REGISTER_IPC_MESSAGE(Ipc_WorkspaceDidChangeWatchedFiles);
+MAKE_REFLECT_STRUCT(In_WorkspaceDidChangeWatchedFiles, params);
+REGISTER_IN_MESSAGE(In_WorkspaceDidChangeWatchedFiles);
 
-struct WorkspaceDidChangeWatchedFilesHandler
-    : BaseMessageHandler<Ipc_WorkspaceDidChangeWatchedFiles> {
-  void Run(Ipc_WorkspaceDidChangeWatchedFiles* request) override {
+struct Handler_WorkspaceDidChangeWatchedFiles
+    : BaseMessageHandler<In_WorkspaceDidChangeWatchedFiles> {
+  MethodType GetMethodType() const override { return kMethodType; }
+  void Run(In_WorkspaceDidChangeWatchedFiles* request) override {
     for (lsFileEvent& event : request->params.changes) {
       std::string path = event.uri.GetPath();
       auto it = project->absolute_path_to_entry_index_.find(path);
@@ -53,7 +55,8 @@ struct WorkspaceDidChangeWatchedFilesHandler
             LOG_S(ERROR) << "Unable to read file content after saving " << path;
           else {
             QueueManager::instance()->index_request.PushBack(
-                Index_Request(path, entry.args, is_interactive, *content, ICacheManager::Make(config)));
+                Index_Request(path, entry.args, is_interactive, *content,
+                              ICacheManager::Make(config)));
             if (is_interactive)
               clang_complete->NotifySave(path);
           }
@@ -61,11 +64,12 @@ struct WorkspaceDidChangeWatchedFilesHandler
         }
         case lsFileChangeType::Deleted:
           QueueManager::instance()->index_request.PushBack(
-              Index_Request(path, entry.args, is_interactive, std::string(), ICacheManager::Make(config)));
+              Index_Request(path, entry.args, is_interactive, std::string(),
+                            ICacheManager::Make(config)));
           break;
       }
     }
   }
 };
-REGISTER_MESSAGE_HANDLER(WorkspaceDidChangeWatchedFilesHandler);
+REGISTER_MESSAGE_HANDLER(Handler_WorkspaceDidChangeWatchedFiles);
 }  // namespace

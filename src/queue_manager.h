@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ipc.h"
+#include "method.h"
 #include "performance.h"
 #include "query.h"
 #include "threaded_queue.h"
@@ -11,7 +11,7 @@ struct ICacheManager;
 struct lsBaseOutMessage;
 
 struct Stdout_Request {
-  IpcId id;
+  MethodType method;
   std::string content;
 };
 
@@ -23,7 +23,6 @@ struct Index_Request {
   std::string contents;  // Preloaded contents.
   std::shared_ptr<ICacheManager> cache_manager;
   lsRequestId id;
-
 
   Index_Request(const std::string& path,
                 const std::vector<std::string>& args,
@@ -67,7 +66,7 @@ struct Index_OnIdMapped {
   bool write_to_disk;
 
   Index_OnIdMapped(const std::shared_ptr<ICacheManager>& cache_manager,
-                   PerformanceImportFile perf, 
+                   PerformanceImportFile perf,
                    bool is_interactive,
                    bool write_to_disk);
 };
@@ -79,20 +78,23 @@ struct Index_OnIndexed {
   Index_OnIndexed(IndexUpdate&& update, PerformanceImportFile perf);
 };
 
-struct QueueManager {
-  static QueueManager* instance();
-  static void CreateInstance(MultiQueueWaiter* querydb_waiter,
-                             MultiQueueWaiter* indexer_waiter,
-                             MultiQueueWaiter* stdout_waiter);
-  static void WriteStdout(IpcId id, lsBaseOutMessage& response);
+class QueueManager {
+  static std::unique_ptr<QueueManager> instance_;
+
+ public:
+  static QueueManager* instance() { return instance_.get(); }
+  static void Init(MultiQueueWaiter* querydb_waiter,
+                   MultiQueueWaiter* indexer_waiter,
+                   MultiQueueWaiter* stdout_waiter);
+  static void WriteStdout(MethodType method, lsBaseOutMessage& response);
 
   bool HasWork();
 
-  // Runs on stdout thread.
+  // Messages received by "stdout" thread.
   ThreadedQueue<Stdout_Request> for_stdout;
 
   // Runs on querydb thread.
-  ThreadedQueue<std::unique_ptr<BaseIpcMessage>> for_querydb;
+  ThreadedQueue<std::unique_ptr<InMessage>> for_querydb;
   ThreadedQueue<Index_DoIdMap> do_id_map;
 
   // Runs on indexer threads.
@@ -108,6 +110,4 @@ struct QueueManager {
   explicit QueueManager(MultiQueueWaiter* querydb_waiter,
                         MultiQueueWaiter* indexer_waiter,
                         MultiQueueWaiter* stdout_waiter);
-
-  static QueueManager* instance_;
 };

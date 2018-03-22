@@ -22,7 +22,8 @@ OUTPUT:
       "detailed_name": "",
       "short_name": "",
       "kind": 0,
-      "parents": [],
+      "declarations": [],
+      "bases": [],
       "derived": [],
       "types": [],
       "funcs": [],
@@ -38,12 +39,12 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [],
-      "definition_spelling": "6:5-6:10",
-      "definition_extent": "6:1-8:2",
-      "base": [],
+      "spell": "6:5-6:10|-1|1|2",
+      "extent": "6:1-8:2|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": ["1@12:5-12:10"],
+      "vars": [],
+      "uses": ["12:5-12:10|1|3|32"],
       "callees": []
     }, {
       "id": 1,
@@ -53,18 +54,16 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [{
-          "spelling": "12:1-12:20",
-          "extent": "12:1-12:20",
-          "content": "int a();\n  int a() { return aaa + bbb; }\n\n\nint make1() {\n  return 3;\n}\nconst int make2 = 5;\n\n\nFOO(make1(), make2)",
+          "spell": "12:1-12:20|-1|1|1",
           "param_spellings": []
         }],
-      "definition_spelling": "12:1-12:20",
-      "definition_extent": "12:1-12:20",
-      "base": [],
+      "spell": "12:1-12:20|-1|1|2",
+      "extent": "12:1-12:20|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
-      "callees": ["0@12:5-12:10"]
+      "vars": [],
+      "uses": [],
+      "callees": ["12:5-12:10|0|3|32"]
     }],
   "vars": [{
       "id": 0,
@@ -73,11 +72,10 @@ OUTPUT:
       "short_name": "make2",
       "hover": "const int make2 = 5",
       "declarations": [],
-      "definition_spelling": "9:11-9:16",
-      "definition_extent": "9:1-9:20",
-      "variable_type": 0,
-      "uses": ["12:14-12:19"],
-      "parent_kind": 0,
+      "spell": "9:11-9:16|-1|1|2",
+      "extent": "9:1-9:20|-1|1|0",
+      "type": 0,
+      "uses": ["12:14-12:19|1|3|4"],
       "kind": 13,
       "storage": 1
     }, {
@@ -87,11 +85,10 @@ OUTPUT:
       "short_name": "FOO",
       "hover": "#define FOO(aaa, bbb)\n  int a();\n  int a() { return aaa + bbb; }",
       "declarations": [],
-      "definition_spelling": "1:9-1:12",
-      "definition_extent": "1:9-3:32",
-      "uses": ["12:1-12:4"],
-      "parent_kind": 0,
-      "kind": 4,
+      "spell": "1:9-1:12|-1|1|2",
+      "extent": "1:9-3:32|-1|1|0",
+      "uses": ["12:1-12:4|-1|1|4"],
+      "kind": 255,
       "storage": 0
     }]
 }

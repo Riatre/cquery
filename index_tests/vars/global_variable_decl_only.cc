@@ -10,7 +10,8 @@ OUTPUT:
       "detailed_name": "",
       "short_name": "",
       "kind": 0,
-      "parents": [],
+      "declarations": [],
+      "bases": [],
       "derived": [],
       "types": [],
       "funcs": [],
@@ -24,10 +25,9 @@ OUTPUT:
       "usr": 9937941849651546906,
       "detailed_name": "int global",
       "short_name": "global",
-      "declarations": ["1:12-1:18"],
-      "variable_type": 0,
+      "declarations": ["1:12-1:18|-1|1|1"],
+      "type": 0,
       "uses": [],
-      "parent_kind": 0,
       "kind": 13,
       "storage": 2
     }]

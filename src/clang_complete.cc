@@ -69,13 +69,31 @@ lsCompletionItemKind GetCompletionKind(CXCursorKind cursor_kind) {
     case CXCursor_UnexposedDecl:
       return lsCompletionItemKind::Text;
 
+    case CXCursor_StructDecl:
+    case CXCursor_UnionDecl:
+      return lsCompletionItemKind::Struct;
+    case CXCursor_ClassDecl:
+      return lsCompletionItemKind::Class;
+    case CXCursor_EnumDecl:
+      return lsCompletionItemKind::Enum;
+    case CXCursor_FieldDecl:
+      return lsCompletionItemKind::Field;
+    case CXCursor_EnumConstantDecl:
+      return lsCompletionItemKind::EnumMember;
+    case CXCursor_FunctionDecl:
+      return lsCompletionItemKind::Function;
+    case CXCursor_VarDecl:
+    case CXCursor_ParmDecl:
+      return lsCompletionItemKind::Variable;
+    case CXCursor_ObjCInterfaceDecl:
+      return lsCompletionItemKind::Interface;
+
     case CXCursor_ObjCInstanceMethodDecl:
     case CXCursor_CXXMethod:
     case CXCursor_ObjCClassMethodDecl:
       return lsCompletionItemKind::Method;
 
     case CXCursor_FunctionTemplate:
-    case CXCursor_FunctionDecl:
       return lsCompletionItemKind::Function;
 
     case CXCursor_Constructor:
@@ -83,35 +101,26 @@ lsCompletionItemKind GetCompletionKind(CXCursorKind cursor_kind) {
     case CXCursor_ConversionFunction:
       return lsCompletionItemKind::Constructor;
 
-    case CXCursor_FieldDecl:
-      return lsCompletionItemKind::Field;
-
-    case CXCursor_VarDecl:
-    case CXCursor_ParmDecl:
     case CXCursor_ObjCIvarDecl:
       return lsCompletionItemKind::Variable;
 
-    case CXCursor_UnionDecl:
     case CXCursor_ClassTemplate:
     case CXCursor_ClassTemplatePartialSpecialization:
-    case CXCursor_ClassDecl:
     case CXCursor_UsingDeclaration:
     case CXCursor_TypedefDecl:
     case CXCursor_TypeAliasDecl:
     case CXCursor_TypeAliasTemplateDecl:
     case CXCursor_ObjCCategoryDecl:
     case CXCursor_ObjCProtocolDecl:
-    case CXCursor_ObjCPropertyDecl:
     case CXCursor_ObjCImplementationDecl:
     case CXCursor_ObjCCategoryImplDecl:
       return lsCompletionItemKind::Class;
 
-    case CXCursor_EnumDecl:
-      return lsCompletionItemKind::Enum;
+    case CXCursor_ObjCPropertyDecl:
+      return lsCompletionItemKind::Property;
 
     case CXCursor_MacroInstantiation:
     case CXCursor_MacroDefinition:
-    case CXCursor_ObjCInterfaceDecl:
       return lsCompletionItemKind::Interface;
 
     case CXCursor_Namespace:
@@ -126,7 +135,6 @@ lsCompletionItemKind GetCompletionKind(CXCursorKind cursor_kind) {
     case CXCursor_ObjCClassRef:
       return lsCompletionItemKind::Reference;
 
-      // return lsCompletionItemKind::Property;
       // return lsCompletionItemKind::Unit;
       // return lsCompletionItemKind::Value;
       // return lsCompletionItemKind::Keyword;
@@ -138,11 +146,9 @@ lsCompletionItemKind GetCompletionKind(CXCursorKind cursor_kind) {
     case CXCursor_OverloadCandidate:
       return lsCompletionItemKind::Text;
 
-    case CXCursor_EnumConstantDecl:
-      return lsCompletionItemKind::EnumMember;
-
-    case CXCursor_StructDecl:
-      return lsCompletionItemKind::Struct;
+    case CXCursor_TemplateTypeParameter:
+    case CXCursor_TemplateTemplateParameter:
+      return lsCompletionItemKind::TypeParameter;
 
     default:
       LOG_S(WARNING) << "Unhandled completion kind " << cursor_kind;
@@ -161,59 +167,61 @@ void BuildCompletionItemTexts(std::vector<lsCompletionItem>& out,
   int num_chunks = clang_getNumCompletionChunks(completion_string);
   for (int i = 0; i < num_chunks; ++i) {
     CXCompletionChunkKind kind =
-      clang_getCompletionChunkKind(completion_string, i);
+        clang_getCompletionChunkKind(completion_string, i);
 
     std::string text;
     switch (kind) {
-    case CXCompletionChunk_LeftParen:       text = '(';  break;
-    case CXCompletionChunk_RightParen:      text = ')';  break;
-    case CXCompletionChunk_LeftBracket:     text = '[';  break;
-    case CXCompletionChunk_RightBracket:    text = ']';  break;
-    case CXCompletionChunk_LeftBrace:       text = '{';  break;
-    case CXCompletionChunk_RightBrace:      text = '}';  break;
-    case CXCompletionChunk_LeftAngle:       text = '<';  break;
-    case CXCompletionChunk_RightAngle:      text = '>';  break;
-    case CXCompletionChunk_Comma:           text = ", "; break;
-    case CXCompletionChunk_Colon:           text = ':';  break;
-    case CXCompletionChunk_SemiColon:       text = ';';  break;
-    case CXCompletionChunk_Equal:           text = '=';  break;
-    case CXCompletionChunk_HorizontalSpace: text = ' ';  break;
-    case CXCompletionChunk_VerticalSpace:   text = ' ';  break;
+      // clang-format off
+      case CXCompletionChunk_LeftParen: text = '('; break;
+      case CXCompletionChunk_RightParen: text = ')'; break;
+      case CXCompletionChunk_LeftBracket: text = '['; break;
+      case CXCompletionChunk_RightBracket: text = ']'; break;
+      case CXCompletionChunk_LeftBrace: text = '{'; break;
+      case CXCompletionChunk_RightBrace: text = '}'; break;
+      case CXCompletionChunk_LeftAngle: text = '<'; break;
+      case CXCompletionChunk_RightAngle: text = '>'; break;
+      case CXCompletionChunk_Comma: text = ", "; break;
+      case CXCompletionChunk_Colon: text = ':'; break;
+      case CXCompletionChunk_SemiColon: text = ';'; break;
+      case CXCompletionChunk_Equal: text = '='; break;
+      case CXCompletionChunk_HorizontalSpace: text = ' '; break;
+      case CXCompletionChunk_VerticalSpace: text = ' '; break;
+        // clang-format on
 
-    case CXCompletionChunk_ResultType:
-      result_type =
-          ToString(clang_getCompletionChunkText(completion_string, i));
-      continue;
+      case CXCompletionChunk_ResultType:
+        result_type =
+            ToString(clang_getCompletionChunkText(completion_string, i));
+        continue;
 
-    case CXCompletionChunk_TypedText:
-    case CXCompletionChunk_Placeholder:
-    case CXCompletionChunk_Text:
-    case CXCompletionChunk_Informative:
-      text = ToString(clang_getCompletionChunkText(completion_string, i));
+      case CXCompletionChunk_TypedText:
+      case CXCompletionChunk_Placeholder:
+      case CXCompletionChunk_Text:
+      case CXCompletionChunk_Informative:
+        text = ToString(clang_getCompletionChunkText(completion_string, i));
 
-      for (auto i = out_first; i < out.size(); ++i) {
-        // first typed text is used for filtering
-        if (kind == CXCompletionChunk_TypedText && !out[i].filterText)
-          out[i].filterText = text;
+        for (auto i = out_first; i < out.size(); ++i) {
+          // first typed text is used for filtering
+          if (kind == CXCompletionChunk_TypedText && !out[i].filterText)
+            out[i].filterText = text;
 
-        if (kind == CXCompletionChunk_Placeholder)
-          out[i].parameters_.push_back(text);
+          if (kind == CXCompletionChunk_Placeholder)
+            out[i].parameters_.push_back(text);
+        }
+        break;
+
+      case CXCompletionChunk_CurrentParameter:
+        // We have our own parsing logic for active parameter. This doesn't seem
+        // to be very reliable.
+        continue;
+
+      case CXCompletionChunk_Optional: {
+        CXCompletionString nested =
+            clang_getCompletionChunkCompletionString(completion_string, i);
+        // duplicate last element, the recursive call will complete it
+        out.push_back(out.back());
+        BuildCompletionItemTexts(out, nested, include_snippets);
+        continue;
       }
-      break;
-
-    case CXCompletionChunk_CurrentParameter:
-      // We have our own parsing logic for active parameter. This doesn't seem
-      // to be very reliable.
-      continue;
-
-    case CXCompletionChunk_Optional: {
-      CXCompletionString nested =
-          clang_getCompletionChunkCompletionString(completion_string, i);
-      // duplicate last element, the recursive call will complete it
-      out.push_back(out.back());
-      BuildCompletionItemTexts(out, nested, include_snippets);
-      continue;
-    }
     }
 
     for (auto i = out_first; i < out.size(); ++i)
@@ -370,12 +378,12 @@ void TryEnsureDocumentParsed(ClangCompleteManager* manager,
   std::vector<CXUnsavedFile> unsaved = snapshot.AsUnsavedFiles();
 
   LOG_S(INFO) << "Creating completion session with arguments "
-              << StringJoin(args);
+              << StringJoin(args, " ");
   *tu = ClangTranslationUnit::Create(index, session->file.filename, args,
                                      unsaved, Flags());
 
   // Build diagnostics.
-  if (manager->config_->diagnosticsOnParse && *tu) {
+  if (manager->config_->diagnostics.onParse && *tu) {
     // If we're emitting diagnostics, do an immediate reparse, otherwise we will
     // emit stale/bad diagnostics.
     *tu = ClangTranslationUnit::Reparse(std::move(*tu), unsaved);
@@ -439,7 +447,15 @@ void CompletionQueryMain(ClangCompleteManager* completion_manager) {
   while (true) {
     // Fetching the completion request blocks until we have a request.
     std::unique_ptr<ClangCompleteManager::CompletionRequest> request =
-        completion_manager->completion_request_.Take();
+        completion_manager->completion_request_.Dequeue();
+
+    // Drop older requests if we're not buffering.
+    while (completion_manager->config_->completion.dropOldRequests &&
+           !completion_manager->completion_request_.IsEmpty()) {
+      completion_manager->on_dropped_(request->id);
+      request = completion_manager->completion_request_.Dequeue();
+    }
+
     std::string path = request->document.uri.GetPath();
 
     std::shared_ptr<CompletionSession> session =
@@ -625,16 +641,35 @@ CompletionSession::~CompletionSession() {}
 ClangCompleteManager::ParseRequest::ParseRequest(const std::string& path)
     : request_time(std::chrono::high_resolution_clock::now()), path(path) {}
 
+ClangCompleteManager::CompletionRequest::CompletionRequest(
+    const lsRequestId& id,
+    const lsTextDocumentIdentifier& document,
+    bool emit_diagnostics)
+    : id(id), document(document), emit_diagnostics(emit_diagnostics) {}
+ClangCompleteManager::CompletionRequest::CompletionRequest(
+    const lsRequestId& id,
+    const lsTextDocumentIdentifier& document,
+    const lsPosition& position,
+    const OnComplete& on_complete,
+    bool emit_diagnostics)
+    : id(id),
+      document(document),
+      position(position),
+      on_complete(on_complete),
+      emit_diagnostics(emit_diagnostics) {}
+
 ClangCompleteManager::ClangCompleteManager(Config* config,
                                            Project* project,
                                            WorkingFiles* working_files,
                                            OnDiagnostic on_diagnostic,
-                                           OnIndex on_index)
+                                           OnIndex on_index,
+                                           OnDropped on_dropped)
     : config_(config),
       project_(project),
       working_files_(working_files),
       on_diagnostic_(on_diagnostic),
       on_index_(on_index),
+      on_dropped_(on_dropped),
       preloaded_sessions_(kMaxPreloadedSessions),
       completion_sessions_(kMaxCompletionSessions) {
   new std::thread([&]() {
@@ -651,33 +686,19 @@ ClangCompleteManager::ClangCompleteManager(Config* config,
 ClangCompleteManager::~ClangCompleteManager() {}
 
 void ClangCompleteManager::CodeComplete(
+    const lsRequestId& id,
     const lsTextDocumentPositionParams& completion_location,
     const OnComplete& on_complete) {
-  completion_request_.WithLock(
-      [&](std::unique_ptr<CompletionRequest>& request_storage) {
-        // Ensure that we have a request.
-        if (!request_storage)
-          request_storage = MakeUnique<CompletionRequest>();
-
-        // Make the request send out code completion information.
-        request_storage->document = completion_location.textDocument;
-        request_storage->position = completion_location.position;
-        request_storage->on_complete = on_complete;
-      });
+  completion_request_.PushBack(std::make_unique<CompletionRequest>(
+      id, completion_location.textDocument, completion_location.position,
+      on_complete, false));
 }
 
 void ClangCompleteManager::DiagnosticsUpdate(
+    const lsRequestId& id,
     const lsTextDocumentIdentifier& document) {
-  completion_request_.WithLock(
-      [&](std::unique_ptr<CompletionRequest>& request_storage) {
-        // Ensure that we have a request.
-        if (!request_storage)
-          request_storage = MakeUnique<CompletionRequest>();
-
-        // Make the request emit diagnostics.
-        request_storage->document = document;
-        request_storage->emit_diagnostics = true;
-      });
+  completion_request_.PushBack(
+      std::make_unique<CompletionRequest>(id, document, true));
 }
 
 void ClangCompleteManager::NotifyView(const std::string& filename) {
@@ -780,4 +801,18 @@ std::shared_ptr<CompletionSession> ClangCompleteManager::TryGetSession(
   }
 
   return completion_session;
+}
+
+void ClangCompleteManager::FlushSession(const std::string& filename) {
+	std::lock_guard<std::mutex> lock(sessions_lock_);
+
+	preloaded_sessions_.TryTake(filename);
+	completion_sessions_.TryTake(filename);
+}
+
+void ClangCompleteManager::FlushAllSessions() {
+	std::lock_guard<std::mutex> lock(sessions_lock_);
+
+	preloaded_sessions_.Clear();
+	completion_sessions_.Clear();
 }

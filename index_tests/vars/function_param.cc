@@ -12,14 +12,15 @@ OUTPUT:
       "usr": 15041163540773201510,
       "detailed_name": "Foo",
       "short_name": "Foo",
-      "kind": 0,
-      "parents": [],
+      "kind": 23,
+      "declarations": ["1:8-1:11|-1|1|1"],
+      "bases": [],
       "derived": [],
       "types": [],
       "funcs": [],
       "vars": [],
       "instances": [0, 1],
-      "uses": ["1:8-1:11", "3:10-3:13", "3:19-3:22"]
+      "uses": ["3:10-3:13|-1|1|4", "3:19-3:22|-1|1|4"]
     }],
   "funcs": [{
       "id": 0,
@@ -29,12 +30,12 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [],
-      "definition_spelling": "3:6-3:9",
-      "definition_extent": "3:1-3:30",
-      "base": [],
+      "spell": "3:6-3:9|-1|1|2",
+      "extent": "3:1-3:30|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
+      "vars": [0, 1],
+      "uses": [],
       "callees": []
     }],
   "vars": [{
@@ -43,13 +44,11 @@ OUTPUT:
       "detailed_name": "Foo *p0",
       "short_name": "p0",
       "declarations": [],
-      "definition_spelling": "3:15-3:17",
-      "definition_extent": "3:10-3:17",
-      "variable_type": 0,
+      "spell": "3:15-3:17|0|3|2",
+      "extent": "3:10-3:17|0|3|0",
+      "type": 0,
       "uses": [],
-      "parent_id": 0,
-      "parent_kind": 3,
-      "kind": 25,
+      "kind": 253,
       "storage": 1
     }, {
       "id": 1,
@@ -57,13 +56,11 @@ OUTPUT:
       "detailed_name": "Foo *p1",
       "short_name": "p1",
       "declarations": [],
-      "definition_spelling": "3:24-3:26",
-      "definition_extent": "3:19-3:26",
-      "variable_type": 0,
+      "spell": "3:24-3:26|0|3|2",
+      "extent": "3:19-3:26|0|3|0",
+      "type": 0,
       "uses": [],
-      "parent_id": 0,
-      "parent_kind": 3,
-      "kind": 25,
+      "kind": 253,
       "storage": 1
     }]
 }

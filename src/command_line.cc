@@ -2,14 +2,15 @@
 #include "cache_manager.h"
 #include "clang_complete.h"
 #include "code_complete_cache.h"
+#include "diagnostics_engine.h"
 #include "file_consumer.h"
 #include "import_manager.h"
 #include "import_pipeline.h"
 #include "include_complete.h"
 #include "indexer.h"
-#include "language_server_api.h"
 #include "lex_utils.h"
 #include "lru_cache.h"
+#include "lsp_diagnostic.h"
 #include "match.h"
 #include "message_handler.h"
 #include "options.h"
@@ -23,7 +24,6 @@
 #include "serializer.h"
 #include "serializers/json.h"
 #include "test.h"
-#include "threaded_queue.h"
 #include "timer.h"
 #include "timestamp_manager.h"
 #include "work_thread.h"
@@ -57,22 +57,18 @@ namespace {
 std::vector<std::string> kEmptyArgs;
 
 // This function returns true if e2e timing should be displayed for the given
-// IpcId.
-bool ShouldDisplayIpcTiming(IpcId id) {
-  switch (id) {
-    case IpcId::TextDocumentPublishDiagnostics:
-    case IpcId::CqueryPublishInactiveRegions:
-    case IpcId::Unknown:
-      return false;
-    default:
-      return true;
-  }
+// MethodId.
+bool ShouldDisplayMethodTiming(MethodType type) {
+  return
+    type != kMethodType_TextDocumentPublishDiagnostics &&
+    type != kMethodType_CqueryPublishInactiveRegions &&
+    type != kMethodType_Unknown;
+  return true;
 }
 
-REGISTER_IPC_MESSAGE(Ipc_CancelRequest);
-
 void PrintHelp() {
-  std::cout << R"help(cquery is a low-latency C/C++/Objective-C language server.
+  std::cout
+      << R"help(cquery is a low-latency C/C++/Objective-C language server.
 
 Mode:
   --clang-sanity-check
@@ -93,6 +89,7 @@ Other command line options:
   --record <path>
                 Writes stdin to <path>.in and stdout to <path>.out
   --log-file <path>    Logging file for diagnostics
+  --log-file-append <path>    Like --log-file, but appending
   --log-all-to-stderr  Write all log messages to STDERR.
   --wait-for-input     Wait for an '[Enter]' before exiting
   --help        Print this help information.
@@ -140,14 +137,20 @@ bool QueryDbMainLoop(Config* config,
                      CodeCompleteCache* non_global_code_complete_cache,
                      CodeCompleteCache* signature_cache) {
   auto* queue = QueueManager::instance();
-  std::vector<std::unique_ptr<BaseIpcMessage>> messages =
+  std::vector<std::unique_ptr<InMessage>> messages =
       queue->for_querydb.DequeueAll();
   bool did_work = messages.size();
   for (auto& message : messages) {
-    QueryDb_Handle(message);
+    // TODO: Consider using std::unordered_map to lookup the handler
+    for (MessageHandler* handler : *MessageHandler::message_handlers) {
+      if (handler->GetMethodType() == message->GetMethodType()) {
+        handler->Run(std::move(message));
+        break;
+      }
+    }
+
     if (message) {
-      LOG_S(FATAL) << "Exiting; unhandled IPC message "
-                   << IpcIdToString(message->method_id);
+      LOG_S(FATAL) << "Exiting; no handler for " << message->GetMethodType();
       exit(1);
     }
   }
@@ -171,22 +174,34 @@ void RunQueryDbThread(const std::string& bin_name,
   SemanticHighlightSymbolCache semantic_cache;
   WorkingFiles working_files;
   FileConsumerSharedState file_consumer_shared;
+  DiagnosticsEngine diag_engine;
 
   ClangCompleteManager clang_complete(
       config, &project, &working_files,
       [&](std::string path, std::vector<lsDiagnostic> diagnostics) {
-        EmitDiagnostics(&working_files, path, diagnostics);
+        diag_engine.Publish(&working_files, path, diagnostics);
       },
       [&](ClangTranslationUnit* tu, const std::vector<CXUnsavedFile>& unsaved,
           const std::string& path, const std::vector<std::string>& args) {
         IndexWithTuFromCodeCompletion(config, &file_consumer_shared, tu,
                                       unsaved, path, args);
+      },
+      [](lsRequestId id) {
+        if (!std::holds_alternative<std::monostate>(id)) {
+          Out_Error out;
+          out.id = id;
+          out.error.code = lsErrorCodes::InternalError;
+          out.error.message =
+              "Dropping completion request; a newer request "
+              "has come in that will be serviced instead.";
+          QueueManager::WriteStdout(kMethodType_Unknown, out);
+        }
       });
 
   IncludeComplete include_complete(config, &project);
-  auto global_code_complete_cache = MakeUnique<CodeCompleteCache>();
-  auto non_global_code_complete_cache = MakeUnique<CodeCompleteCache>();
-  auto signature_cache = MakeUnique<CodeCompleteCache>();
+  auto global_code_complete_cache = std::make_unique<CodeCompleteCache>();
+  auto non_global_code_complete_cache = std::make_unique<CodeCompleteCache>();
+  auto signature_cache = std::make_unique<CodeCompleteCache>();
   ImportManager import_manager;
   ImportPipelineStatus import_pipeline_status;
   TimestampManager timestamp_manager;
@@ -198,6 +213,7 @@ void RunQueryDbThread(const std::string& bin_name,
     handler->db = &db;
     handler->waiter = indexer_waiter;
     handler->project = &project;
+    handler->diag_engine = &diag_engine;
     handler->file_consumer_shared = &file_consumer_shared;
     handler->import_manager = &import_manager;
     handler->import_pipeline_status = &import_pipeline_status;
@@ -257,7 +273,7 @@ void RunQueryDbThread(const std::string& bin_name,
 //
 // |ipc| is connected to a server.
 void LaunchStdinLoop(Config* config,
-                     std::unordered_map<IpcId, Timer>* request_times) {
+                     std::unordered_map<MethodType, Timer>* request_times) {
   // If flushing cin requires flushing cout there could be deadlocks in some
   // clients.
   std::cin.tie(nullptr);
@@ -265,7 +281,7 @@ void LaunchStdinLoop(Config* config,
   WorkThread::StartThread("stdin", [request_times]() {
     auto* queue = QueueManager::instance();
     while (true) {
-      std::unique_ptr<BaseIpcMessage> message;
+      std::unique_ptr<InMessage> message;
       optional<std::string> err =
           MessageRegistry::instance()->ReadMessageFromStdin(&message);
 
@@ -280,82 +296,28 @@ void LaunchStdinLoop(Config* config,
             out.id = id;
             out.error.code = lsErrorCodes::InvalidParams;
             out.error.message = std::move(*err);
-            queue->WriteStdout(IpcId::Unknown, out);
+            queue->WriteStdout(kMethodType_Unknown, out);
           }
         }
         continue;
       }
 
       // Cache |method_id| so we can access it after moving |message|.
-      IpcId method_id = message->method_id;
-      (*request_times)[method_id] = Timer();
+      MethodType method_type = message->GetMethodType();
+      (*request_times)[method_type] = Timer();
 
-      switch (method_id) {
-        case IpcId::Initialized: {
-          // TODO: don't send output until we get this notification
-          break;
-        }
-
-        case IpcId::CancelRequest: {
-          // TODO: support cancellation
-          break;
-        }
-
-        case IpcId::Shutdown:
-        case IpcId::Exit:
-        case IpcId::Initialize:
-        case IpcId::TextDocumentDidOpen:
-        case IpcId::CqueryTextDocumentDidView:
-        case IpcId::TextDocumentDidChange:
-        case IpcId::TextDocumentDidClose:
-        case IpcId::TextDocumentDidSave:
-        case IpcId::TextDocumentFormatting:
-        case IpcId::TextDocumentRangeFormatting:
-        case IpcId::TextDocumentOnTypeFormatting:
-        case IpcId::TextDocumentRename:
-        case IpcId::TextDocumentCompletion:
-        case IpcId::TextDocumentSignatureHelp:
-        case IpcId::TextDocumentDefinition:
-        case IpcId::TextDocumentDocumentHighlight:
-        case IpcId::TextDocumentHover:
-        case IpcId::TextDocumentReferences:
-        case IpcId::TextDocumentDocumentSymbol:
-        case IpcId::TextDocumentDocumentLink:
-        case IpcId::TextDocumentCodeAction:
-        case IpcId::TextDocumentCodeLens:
-        case IpcId::WorkspaceDidChangeWatchedFiles:
-        case IpcId::WorkspaceSymbol:
-        case IpcId::CqueryFreshenIndex:
-        case IpcId::CqueryTypeHierarchyTree:
-        case IpcId::CqueryCallTreeInitial:
-        case IpcId::CqueryCallTreeExpand:
-        case IpcId::CqueryMemberHierarchyInitial:
-        case IpcId::CqueryMemberHierarchyExpand:
-        case IpcId::CqueryVars:
-        case IpcId::CqueryCallers:
-        case IpcId::CqueryBase:
-        case IpcId::CqueryDerived:
-        case IpcId::CqueryIndexFile:
-        case IpcId::CqueryWait: {
-          queue->for_querydb.PushBack(std::move(message));
-          break;
-        }
-
-        default: {
-          LOG_S(ERROR) << "Unhandled IPC message " << IpcIdToString(method_id);
-          exit(1);
-        }
-      }
+      LOG_S(ERROR) << "!! Got message of type " << method_type;
+      queue->for_querydb.PushBack(std::move(message));
 
       // If the message was to exit then querydb will take care of the actual
       // exit. Stop reading from stdin since it might be detached.
-      if (method_id == IpcId::Exit)
+      if (method_type == kMethodType_Exit)
         break;
     }
   });
 }
 
-void LaunchStdoutThread(std::unordered_map<IpcId, Timer>* request_times,
+void LaunchStdoutThread(std::unordered_map<MethodType, Timer>* request_times,
                         MultiQueueWaiter* waiter) {
   WorkThread::StartThread("stdout", [=]() {
     auto* queue = QueueManager::instance();
@@ -368,16 +330,15 @@ void LaunchStdoutThread(std::unordered_map<IpcId, Timer>* request_times,
       }
 
       for (auto& message : messages) {
-        if (ShouldDisplayIpcTiming(message.id)) {
-          Timer time = (*request_times)[message.id];
-          time.ResetAndPrint("[e2e] Running " +
-                             std::string(IpcIdToString(message.id)));
+        if (ShouldDisplayMethodTiming(message.method)) {
+          Timer time = (*request_times)[message.method];
+          time.ResetAndPrint("[e2e] Running " + std::string(message.method));
         }
 
         RecordOutput(message.content);
 
-        std::cout << message.content;
-        std::cout.flush();
+        fwrite(message.content.c_str(), message.content.size(), 1, stdout);
+        fflush(stdout);
       }
     }
   });
@@ -388,7 +349,7 @@ void LanguageServerMain(const std::string& bin_name,
                         MultiQueueWaiter* querydb_waiter,
                         MultiQueueWaiter* indexer_waiter,
                         MultiQueueWaiter* stdout_waiter) {
-  std::unordered_map<IpcId, Timer> request_times;
+  std::unordered_map<MethodType, Timer> request_times;
 
   LaunchStdinLoop(config, &request_times);
 
@@ -426,7 +387,9 @@ int main(int argc, char** argv) {
 
   if (HasOption(options, "-h") || HasOption(options, "--help")) {
     PrintHelp();
-    return 0;
+    // Also emit doctest help if --test-unit is passed.
+    if (!HasOption(options, "--test-unit"))
+      return 0;
   }
 
   if (!HasOption(options, "--log-all-to-stderr"))
@@ -436,8 +399,7 @@ int main(int argc, char** argv) {
   loguru::init(argc, argv);
 
   MultiQueueWaiter querydb_waiter, indexer_waiter, stdout_waiter;
-  QueueManager::CreateInstance(&querydb_waiter, &indexer_waiter,
-                               &stdout_waiter);
+  QueueManager::Init(&querydb_waiter, &indexer_waiter, &stdout_waiter);
 
   PlatformInit();
   IndexInit();
@@ -446,6 +408,10 @@ int main(int argc, char** argv) {
 
   if (HasOption(options, "--log-file")) {
     loguru::add_file(options["--log-file"].c_str(), loguru::Truncate,
+                     loguru::Verbosity_MAX);
+  }
+  if (HasOption(options, "--log-file-append")) {
+    loguru::add_file(options["--log-file-append"].c_str(), loguru::Append,
                      loguru::Verbosity_MAX);
   }
 
@@ -498,7 +464,7 @@ int main(int argc, char** argv) {
     }
 
     // std::cerr << "Running language server" << std::endl;
-    auto config = MakeUnique<Config>();
+    auto config = std::make_unique<Config>();
     LanguageServerMain(argv[0], config.get(), &querydb_waiter, &indexer_waiter,
                        &stdout_waiter);
   }

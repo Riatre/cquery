@@ -17,12 +17,12 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [],
-      "definition_spelling": "1:6-1:12",
-      "definition_extent": "1:1-1:17",
-      "base": [],
+      "spell": "1:6-1:12|-1|1|2",
+      "extent": "1:1-1:17|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": ["1@3:3-3:9"],
+      "vars": [],
+      "uses": ["3:3-3:9|1|3|32"],
       "callees": []
     }, {
       "id": 1,
@@ -32,13 +32,13 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [],
-      "definition_spelling": "2:6-2:12",
-      "definition_extent": "2:1-4:2",
-      "base": [],
+      "spell": "2:6-2:12|-1|1|2",
+      "extent": "2:1-4:2|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
-      "callees": ["0@3:3-3:9"]
+      "vars": [],
+      "uses": [],
+      "callees": ["3:3-3:9|0|3|32"]
     }],
   "vars": []
 }

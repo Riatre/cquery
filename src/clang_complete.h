@@ -1,10 +1,10 @@
 #pragma once
 
-#include "atomic_object.h"
 #include "clang_index.h"
 #include "clang_translation_unit.h"
-#include "language_server_api.h"
 #include "lru_cache.h"
+#include "lsp_completion.h"
+#include "lsp_diagnostic.h"
 #include "project.h"
 #include "threaded_queue.h"
 #include "working_files.h"
@@ -47,6 +47,7 @@ struct ClangCompleteManager {
   using OnComplete =
       std::function<void(const std::vector<lsCompletionItem>& results,
                          bool is_cached_result)>;
+  using OnDropped = std::function<void(lsRequestId request_id)>;
 
   struct ParseRequest {
     ParseRequest(const std::string& path);
@@ -55,6 +56,16 @@ struct ClangCompleteManager {
     std::string path;
   };
   struct CompletionRequest {
+    CompletionRequest(const lsRequestId& id,
+                      const lsTextDocumentIdentifier& document,
+                      bool emit_diagnostics);
+    CompletionRequest(const lsRequestId& id,
+                      const lsTextDocumentIdentifier& document,
+                      const lsPosition& position,
+                      const OnComplete& on_complete,
+                      bool emit_diagnostics);
+
+    lsRequestId id;
     lsTextDocumentIdentifier document;
     optional<lsPosition> position;
     OnComplete on_complete;  // May be null/empty.
@@ -65,15 +76,18 @@ struct ClangCompleteManager {
                        Project* project,
                        WorkingFiles* working_files,
                        OnDiagnostic on_diagnostic,
-                       OnIndex on_index);
+                       OnIndex on_index,
+                       OnDropped on_dropped);
   ~ClangCompleteManager();
 
   // Start a code completion at the given location. |on_complete| will run when
   // completion results are available. |on_complete| may run on any thread.
-  void CodeComplete(const lsTextDocumentPositionParams& completion_location,
+  void CodeComplete(const lsRequestId& request_id,
+                    const lsTextDocumentPositionParams& completion_location,
                     const OnComplete& on_complete);
   // Request a diagnostics update.
-  void DiagnosticsUpdate(const lsTextDocumentIdentifier& document);
+  void DiagnosticsUpdate(const lsRequestId& request_id,
+                         const lsTextDocumentIdentifier& document);
 
   // Notify the completion manager that |filename| has been viewed and we
   // should begin preloading completion data.
@@ -96,6 +110,11 @@ struct ClangCompleteManager {
                                                    bool mark_as_completion,
                                                    bool create_if_needed);
 
+  // Flushes all saved sessions with the supplied filename
+  void FlushSession(const std::string& filename);
+  // Flushes all saved sessions
+  void FlushAllSessions(void);
+
   // TODO: make these configurable.
   const int kMaxPreloadedSessions = 10;
   const int kMaxCompletionSessions = 5;
@@ -106,6 +125,7 @@ struct ClangCompleteManager {
   WorkingFiles* working_files_;
   OnDiagnostic on_diagnostic_;
   OnIndex on_index_;
+  OnDropped on_dropped_;
 
   using LruSessionCache = LruCache<std::string, CompletionSession>;
 
@@ -120,7 +140,7 @@ struct ClangCompleteManager {
   std::mutex sessions_lock_;
 
   // Request a code completion at the given location.
-  AtomicObject<CompletionRequest> completion_request_;
+  ThreadedQueue<std::unique_ptr<CompletionRequest>> completion_request_;
   // Parse requests. The path may already be parsed, in which case it should be
   // reparsed.
   ThreadedQueue<ParseRequest> parse_requests_;

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "language_server_api.h"
+#include "lsp_completion.h"
 
 #include <atomic>
 #include <mutex>

@@ -129,18 +129,24 @@ bool IsSymLink(const std::string& path) {
   return false;
 }
 
-std::vector<std::string> GetPlatformClangArguments() {
+std::vector<const char*> GetPlatformClangArguments() {
   //
   // Found by executing
   //
   //   $ clang++ -E -x c++ - -v
   //
-
-  // clang-format off
-  return {
-    // "-fms-extensions", "-fms-compatibility", "-fdelayed-template-parsing"
-  };
-  // clang-format on
+  // https://clang.llvm.org/docs/MSVCCompatibility.html
+  //
+  //
+  // These options are only needed if clang is targeting the msvc triple,
+  // which depends on how clang was build for windows. clang downloaded from
+  // releases.llvm.org defaults to msvc, so cquery does as well.
+  //
+  // https://github.com/cquery-project/cquery/issues/509 has more context.
+  //
+  /* return {"-fms-extensions", "-fms-compatibility", */
+  /*         "-fdelayed-template-parsing"}; */
+  return {};
 }
 
 void FreeUnusedMemory() {}
@@ -151,5 +157,10 @@ bool RunObjectiveCIndexTests() {
 
 // TODO Wait for debugger to attach
 void TraceMe() {}
+
+std::string GetExternalCommandOutput(const std::vector<std::string>& command,
+                                     std::string_view input) {
+  return "";
+}
 
 #endif

@@ -66,7 +66,7 @@ IndexFile* FileConsumer::TryConsumeFile(CXFile file,
 
   // No result in local; we need to query global.
   bool did_insert = shared_->Mark(file_name);
-  
+
   // We did not take the file from global. Cache that we failed so we don't try
   // again and return nullptr.
   if (!did_insert) {
@@ -75,7 +75,8 @@ IndexFile* FileConsumer::TryConsumeFile(CXFile file,
   }
 
   // Read the file contents, if we fail then we cannot index the file.
-  optional<std::string> contents = GetFileContents(file_name, file_contents_map);
+  optional<std::string> contents =
+      GetFileContents(file_name, file_contents_map);
   if (!contents) {
     *is_first_ownership = false;
     return nullptr;
@@ -83,7 +84,7 @@ IndexFile* FileConsumer::TryConsumeFile(CXFile file,
 
   // Build IndexFile instance.
   *is_first_ownership = true;
-  local_[file_id] = MakeUnique<IndexFile>(file_name, *contents);
+  local_[file_id] = std::make_unique<IndexFile>(file_name, *contents);
   return local_[file_id].get();
 }
 

@@ -8,16 +8,17 @@ OUTPUT:
   "types": [{
       "id": 0,
       "usr": 13749354388332789217,
-      "detailed_name": "",
-      "short_name": "",
-      "kind": 0,
-      "parents": [],
+      "detailed_name": "ForwardType",
+      "short_name": "ForwardType",
+      "kind": 23,
+      "declarations": ["1:8-1:19|-1|1|1"],
+      "bases": [],
       "derived": [],
       "types": [],
       "funcs": [],
       "vars": [],
       "instances": [],
-      "uses": ["1:8-1:19", "2:10-2:21"]
+      "uses": ["2:10-2:21|-1|1|4"]
     }],
   "funcs": [{
       "id": 0,
@@ -27,12 +28,12 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [],
-      "definition_spelling": "2:6-2:9",
-      "definition_extent": "2:1-2:26",
-      "base": [],
+      "spell": "2:6-2:9|-1|1|2",
+      "extent": "2:1-2:26|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
+      "vars": [],
+      "uses": [],
       "callees": []
     }],
   "vars": []

@@ -1,5 +1,6 @@
 #include "clang_complete.h"
 #include "code_complete_cache.h"
+#include "fuzzy_match.h"
 #include "include_complete.h"
 #include "message_handler.h"
 #include "queue_manager.h"
@@ -10,7 +11,10 @@
 
 #include <loguru.hpp>
 
+#include <regex>
+
 namespace {
+MethodType kMethodType = "textDocument/completion";
 
 // How a completion was triggered
 enum class lsCompletionTriggerKind {
@@ -44,13 +48,12 @@ struct lsCompletionParams : lsTextDocumentPositionParams {
 };
 MAKE_REFLECT_STRUCT(lsCompletionParams, textDocument, position, context);
 
-struct Ipc_TextDocumentComplete
-    : public RequestMessage<Ipc_TextDocumentComplete> {
-  const static IpcId kIpcId = IpcId::TextDocumentCompletion;
+struct In_TextDocumentComplete : public RequestInMessage {
+  MethodType GetMethodType() const override { return kMethodType; }
   lsCompletionParams params;
 };
-MAKE_REFLECT_STRUCT(Ipc_TextDocumentComplete, id, params);
-REGISTER_IPC_MESSAGE(Ipc_TextDocumentComplete);
+MAKE_REFLECT_STRUCT(In_TextDocumentComplete, id, params);
+REGISTER_IN_MESSAGE(In_TextDocumentComplete);
 
 struct lsTextDocumentCompleteResult {
   // This list it not complete. Further typing should result in recomputing
@@ -68,17 +71,52 @@ struct Out_TextDocumentComplete
 };
 MAKE_REFLECT_STRUCT(Out_TextDocumentComplete, jsonrpc, id, result);
 
-bool CompareLsCompletionItem(const lsCompletionItem& lhs,
-                             const lsCompletionItem& rhs) {
-  if (lhs.found_ != rhs.found_)
-    return !lhs.found_ < !rhs.found_;
-  if (lhs.skip_ != rhs.skip_)
-    return lhs.skip_ < rhs.skip_;
-  if (lhs.priority_ != rhs.priority_)
-    return lhs.priority_ < rhs.priority_;
-  if (lhs.filterText->length() != rhs.filterText->length())
-    return lhs.filterText->length() < rhs.filterText->length();
-  return *lhs.filterText < *rhs.filterText;
+void DecorateIncludePaths(const std::smatch& match,
+                          std::vector<lsCompletionItem>* items) {
+  std::string spaces_after_include = " ";
+  if (match[3].compare("include") == 0 && match[5].length())
+    spaces_after_include = match[4].str();
+
+  std::string prefix =
+      match[1].str() + '#' + match[2].str() + "include" + spaces_after_include;
+  std::string suffix = match[7].str();
+
+  for (lsCompletionItem& item : *items) {
+    char quote0, quote1;
+    if (match[5].compare("<") == 0 ||
+        (match[5].length() == 0 && item.use_angle_brackets_))
+      quote0 = '<', quote1 = '>';
+    else
+      quote0 = quote1 = '"';
+
+    item.textEdit->newText =
+        prefix + quote0 + item.textEdit->newText + quote1 + suffix;
+    item.label = prefix + quote0 + item.label + quote1 + suffix;
+    item.filterText = nullopt;
+  }
+}
+
+struct ParseIncludeLineResult {
+  bool ok;
+  std::string pattern;
+  std::smatch match;
+};
+
+ParseIncludeLineResult ParseIncludeLine(const std::string& line) {
+  static const std::regex pattern(
+      "(\\s*)"        // [1]: spaces before '#'
+      "#"             //
+      "(\\s*)"        // [2]: spaces after '#'
+      "([^\\s\"<]*)"  // [3]: "include"
+      "(\\s*)"        // [4]: spaces before quote
+      "([\"<])?"      // [5]: the first quote char
+      "([^\\s\">]*)"  // [6]: path of file
+      "[\">]?"        //
+      "(.*)");        // [7]: suffix after quote char
+  std::smatch match;
+  bool ok = std::regex_match(line, match, pattern);
+  std::string text = match[3].str() + match[6].str();
+  return {ok, text, match};
 }
 
 template <typename T>
@@ -103,6 +141,9 @@ void FilterAndSortCompletionResponse(
     Out_TextDocumentComplete* complete_response,
     const std::string& complete_text,
     bool enable) {
+  if (!enable)
+    return;
+
   ScopedPerfTimer timer("FilterAndSortCompletionResponse");
 
 // Used to inject more completions.
@@ -121,80 +162,71 @@ void FilterAndSortCompletionResponse(
 
   auto& items = complete_response->result.items;
 
-  if (!enable || complete_text.empty()) {
-    // Just set the |sortText| to be the priority and return.
+  auto finalize = [&]() {
+    const size_t kMaxResultSize = 100u;
+    if (items.size() > kMaxResultSize) {
+      items.resize(kMaxResultSize);
+      complete_response->result.isIncomplete = true;
+    }
+
+    // Set sortText. Note that this happens after resizing - we could do it
+    // before, but then we should also sort by priority.
     char buf[16];
-    for (auto& item : items)
-      item.sortText = tofixedbase64(item.priority_, buf);
+    for (size_t i = 0; i < items.size(); ++i)
+      items[i].sortText = tofixedbase64(i, buf);
+  };
+
+  // No complete text; don't run any filtering logic except to trim the items.
+  if (complete_text.empty()) {
+    finalize();
     return;
   }
 
   // Make sure all items have |filterText| set, code that follow needs it.
-  for (auto& item : items)
+  for (auto& item : items) {
     if (!item.filterText)
       item.filterText = item.label;
-
-  // If the text doesn't start with underscore,
-  // remove all candidates that start with underscore.
-  if (complete_text[0] != '_') {
-    auto filter = [](const lsCompletionItem& item) {
-      return (*item.filterText)[0] == '_';
-    };
-    items.erase(std::remove_if(items.begin(), items.end(), filter),
-                items.end());
   }
 
-  // Fuzzy match.
-  bool found = false;
+  // Fuzzy match and remove awful candidates.
+  FuzzyMatcher fuzzy(complete_text);
   for (auto& item : items) {
-    std::tie(item.found_, item.skip_) =
-        SubsequenceCountSkip(complete_text, *item.filterText);
-    found = found || item.found_;
+    item.score_ =
+        CaseFoldingSubsequenceMatch(complete_text, *item.filterText).first
+            ? fuzzy.Match(*item.filterText)
+            : FuzzyMatcher::kMinScore;
   }
+  items.erase(std::remove_if(items.begin(), items.end(),
+                             [](const lsCompletionItem& item) {
+                               return item.score_ <= FuzzyMatcher::kMinScore;
+                             }),
+              items.end());
+  std::sort(items.begin(), items.end(),
+            [](const lsCompletionItem& lhs, const lsCompletionItem& rhs) {
+              if (lhs.score_ != rhs.score_)
+                return lhs.score_ > rhs.score_;
+              if (lhs.priority_ != rhs.priority_)
+                return lhs.priority_ < rhs.priority_;
+              if (lhs.filterText->size() != rhs.filterText->size())
+                return lhs.filterText->size() < rhs.filterText->size();
+              return *lhs.filterText < *rhs.filterText;
+            });
 
-  if (found) {
-    auto filter = [](const lsCompletionItem& item) { return !item.found_; };
-    items.erase(std::remove_if(items.begin(), items.end(), filter),
-                items.end());
-  }
-
-  // Order all items and set |sortText|.
-  const size_t kMaxSortSize = 200u;
-  if (found) {
-    if (items.size() <= kMaxSortSize)
-      std::sort(items.begin(), items.end(), CompareLsCompletionItem);
-    else {
-      // Just place items that found the text before those not.
-      std::vector<lsCompletionItem> items_found, items_notfound;
-      for (auto& item : items)
-        (item.found_ ? items_found : items_notfound).push_back(item);
-      items = items_found;
-      items.insert(items.end(), items_notfound.begin(), items_notfound.end());
-    }
-  }
-
-  char buf[16];
-  for (size_t i = 0; i < items.size(); ++i)
-    items[i].sortText = tofixedbase64(i, buf);
-
-  const size_t kMaxResultSize = 100u;
-  if (items.size() > kMaxResultSize) {
-    items.resize(kMaxResultSize);
-    complete_response->result.isIncomplete = true;
-  }
+  // Trim result.
+  finalize();
 }
 
-struct TextDocumentCompletionHandler : MessageHandler {
-  IpcId GetId() const override { return IpcId::TextDocumentCompletion; }
+struct Handler_TextDocumentCompletion : MessageHandler {
+  MethodType GetMethodType() const override { return kMethodType; }
 
-  void Run(std::unique_ptr<BaseIpcMessage> message) override {
-    auto request = std::shared_ptr<Ipc_TextDocumentComplete>(
-        static_cast<Ipc_TextDocumentComplete*>(message.release()));
+  void Run(std::unique_ptr<InMessage> message) override {
+    auto request = std::shared_ptr<In_TextDocumentComplete>(
+        static_cast<In_TextDocumentComplete*>(message.release()));
 
     auto write_empty_result = [request]() {
       Out_TextDocumentComplete out;
       out.id = request->id;
-      QueueManager::WriteStdout(IpcId::TextDocumentCompletion, out);
+      QueueManager::WriteStdout(kMethodType, out);
     };
 
     std::string path = request->params.textDocument.uri.GetPath();
@@ -221,9 +253,10 @@ struct TextDocumentCompletionHandler : MessageHandler {
       bool did_fail_check = false;
 
       std::string character = *request->params.context->triggerCharacter;
-      char preceding_index = request->params.position.character - 2;
+      int preceding_index = request->params.position.character - 2;
 
-      // If the character is '"', '<' or '/', make sure that the line starts with '#'.
+      // If the character is '"', '<' or '/', make sure that the line starts
+      // with '#'.
       if (character == "\"" || character == "<" || character == "/") {
         size_t i = 0;
         while (i < buffer_line.size() && isspace(buffer_line[i]))
@@ -238,7 +271,8 @@ struct TextDocumentCompletionHandler : MessageHandler {
       }
       // If the character is > but - does not preced it, or if it is : and :
       // does not preced it, do not show completion results.
-      else if (preceding_index < buffer_line.size()) {
+      else if (preceding_index >= 0 &&
+               preceding_index < (int)buffer_line.size()) {
         char preceding = buffer_line[preceding_index];
         did_fail_check = (preceding != '-' && character == ">") ||
                          (preceding != ':' && character == ":");
@@ -269,17 +303,17 @@ struct TextDocumentCompletionHandler : MessageHandler {
             include_complete->completion_items_mutex, std::defer_lock);
         if (include_complete->is_scanning)
           lock.lock();
-        out.result.items.assign(include_complete->completion_items.begin(),
-                                include_complete->completion_items.end());
-        if (lock)
-          lock.unlock();
+        std::string quote = result.match[5];
+        for (auto& item : include_complete->completion_items)
+          if (quote.empty() || quote == (item.use_angle_brackets_ ? "<" : "\""))
+            out.result.items.push_back(item);
       }
 
       // Needed by |FilterAndSortCompletionResponse|.
       for (lsCompletionItem& item : out.result.items)
-        item.filterText = "include" + item.label;
+        item.filterText = item.label;
 
-      FilterAndSortCompletionResponse(&out, result.text,
+      FilterAndSortCompletionResponse(&out, result.pattern,
                                       config->completion.filterAndSort);
       DecorateIncludePaths(result.match, &out.result.items);
 
@@ -290,22 +324,8 @@ struct TextDocumentCompletionHandler : MessageHandler {
         item.textEdit->range.end.character = (int)buffer_line.size();
       }
 
-      QueueManager::WriteStdout(IpcId::TextDocumentCompletion, out);
+      QueueManager::WriteStdout(kMethodType, out);
     } else {
-      // If existing completion is empty, dont return clang-based completion
-      // results Only do this when trigger is not manual or context doesn't
-      // exist (for Atom support).
-      if (existing_completion.empty() && is_global_completion &&
-          (request->params.context && request->params.context->triggerKind !=
-                                          lsCompletionTriggerKind::Invoked)) {
-        LOG_S(INFO) << "Existing completion is empty, no completion results "
-                       "will be returned";
-        Out_TextDocumentComplete out;
-        out.id = request->id;
-        QueueManager::WriteStdout(IpcId::TextDocumentCompletion, out);
-        return;
-      }
-
       ClangCompleteManager::OnComplete callback = std::bind(
           [this, is_global_completion, existing_completion, request](
               const std::vector<lsCompletionItem>& results,
@@ -317,7 +337,7 @@ struct TextDocumentCompletionHandler : MessageHandler {
             // Emit completion results.
             FilterAndSortCompletionResponse(&out, existing_completion,
                                             config->completion.filterAndSort);
-            QueueManager::WriteStdout(IpcId::TextDocumentCompletion, out);
+            QueueManager::WriteStdout(kMethodType, out);
 
             // Cache completion results.
             if (!is_cached_result) {
@@ -361,7 +381,8 @@ struct TextDocumentCompletionHandler : MessageHandler {
           callback(global_code_complete_cache->cached_results_,
                    true /*is_cached_result*/);
         });
-        clang_complete->CodeComplete(request->params, freshen_global);
+        clang_complete->CodeComplete(request->id, request->params,
+                                     freshen_global);
       } else if (non_global_code_complete_cache->IsCacheValid(
                      request->params)) {
         non_global_code_complete_cache->WithLock([&]() {
@@ -369,11 +390,11 @@ struct TextDocumentCompletionHandler : MessageHandler {
                    true /*is_cached_result*/);
         });
       } else {
-        clang_complete->CodeComplete(request->params, callback);
+        clang_complete->CodeComplete(request->id, request->params, callback);
       }
     }
   }
 };
-REGISTER_MESSAGE_HANDLER(TextDocumentCompletionHandler);
+REGISTER_MESSAGE_HANDLER(Handler_TextDocumentCompletion);
 
 }  // namespace

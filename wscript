@@ -25,7 +25,7 @@ CLANG_TARBALL_EXT = '.tar.xz'
 if sys.platform == 'darwin':
   CLANG_TARBALL_NAME = 'clang+llvm-$version-x86_64-apple-darwin'
 elif sys.platform.startswith('freebsd'):
-  CLANG_TARBALL_NAME = 'clang+llvm-$version-amd64-unknown-freebsd10'
+  CLANG_TARBALL_NAME = 'clang+llvm-$version-amd64-unknown-freebsd-10'
 # It is either 'linux2' or 'linux3' before Python 3.3
 elif sys.platform.startswith('linux'):
   # These executable depend on libtinfo.so.5
@@ -83,12 +83,11 @@ def patch_byte_in_libclang(filename, offset, old, new):
 def options(opt):
   opt.load('compiler_cxx')
   grp = opt.add_option_group('Configuration options related to use of clang from the system (not recommended)')
-  grp.add_option('--use-system-clang', dest='use_system_clang', default=False, action='store_true',
-                 help='deprecated. Please specify --llvm-config, e.g. /usr/bin/llvm-config llvm-config-6.0')
+  grp.add_option('--enable-assert', action='store_true')
   grp.add_option('--use-clang-cxx', dest='use_clang_cxx', default=False, action='store_true',
                  help='use clang C++ API')
-  grp.add_option('--bundled-clang', dest='bundled_clang', default='5.0.1',
-                 help='bundled clang version, downloaded from https://releases.llvm.org/ , e.g. 4.0.0 5.0.1')
+  grp.add_option('--bundled-clang', dest='bundled_clang', default='6.0.0',
+                 help='bundled clang version, downloaded from https://releases.llvm.org/ , e.g. 5.0.1 6.0.0')
   grp.add_option('--llvm-config', dest='llvm_config',
                  help='path to llvm-config to use system libclang, e.g. llvm-config llvm-config-6.0')
   grp.add_option('--clang-prefix', dest='clang_prefix',
@@ -170,9 +169,11 @@ def configure(ctx):
       cxxflags = ['-g', '-Wall', '-Wno-sign-compare']
       if ctx.env.CXX_NAME == 'gcc':
         cxxflags.append('-Wno-return-type')
+        # Otherwise (void)write(...) => -Werror=unused-result
+        cxxflags.append('-Wno-unused-result')
 
     if all(not x.startswith('-std=') for x in ctx.env.CXXFLAGS):
-      cxxflags.append('-std=c++11')
+      cxxflags.append('-std=c++14')
 
     if ctx.options.use_clang_cxx:
       # include/clang/Format/Format.h error: multi-line comment
@@ -185,6 +186,12 @@ def configure(ctx):
       ldflags.append('-fsanitize=address,undefined')
     if 'release' in ctx.options.variant:
       cxxflags.append('-O' if 'asan' in ctx.options.variant else '-O3')
+
+  if ctx.options.enable_assert is None:
+    if 'debug' in ctx.options.variant:
+      ctx.options.enable_assert = True
+  if not ctx.options.enable_assert:
+    ctx.define('NDEBUG', 1)
 
   if ctx.env.CXX_NAME == 'clang' and 'debug' in ctx.options.variant:
     cxxflags.append('-fno-limit-debug-info')
@@ -206,23 +213,15 @@ def configure(ctx):
       return 'lib' + lib
     return lib
 
-  # TODO remove
-  if ctx.options.use_system_clang:
-    print((('!' * 50)+'\n')*3)
-    print('--use-system-clang is deprecated. Please specify --llvm-config, e.g. /usr/bin/llvm-config llvm-config-6.0')
-
   # Do not use bundled clang+llvm
-  if ctx.options.llvm_config is not None:
-    # Ask llvm-config for cflags and ldflags
-    ctx.find_program(ctx.options.llvm_config, msg='checking for llvm-config', var='LLVM_CONFIG', mandatory=False)
+  if ctx.options.llvm_config is not None or ctx.options.clang_prefix is not None:
+    if ctx.options.llvm_config is not None:
+      # Ask llvm-config for cflags and ldflags
+      ctx.find_program(ctx.options.llvm_config, msg='checking for llvm-config', var='LLVM_CONFIG', mandatory=False)
 
-    if len(ctx.options.llvm_config):
       ctx.env.rpath = [str(subprocess.check_output(
         [ctx.options.llvm_config, '--libdir'],
         stderr=subprocess.STDOUT).decode()).strip()]
-    else:
-      # If `--llvm-config=` (empty)
-      ctx.env.rpath = []
 
     if ctx.options.clang_prefix:
       ctx.start_msg('Checking for clang prefix')
@@ -340,7 +339,6 @@ def build(bld):
   if sys.platform.startswith('linux'):
     # For __atomic_* when lock free instructions are unavailable
     # (either through hardware or OS support)
-    lib.append('atomic')
     lib.append('pthread')
     # loguru calls dladdr
     lib.append('dl')

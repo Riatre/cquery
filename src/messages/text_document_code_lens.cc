@@ -1,48 +1,24 @@
 #include "clang_complete.h"
+#include "lsp_code_action.h"
 #include "message_handler.h"
 #include "query_utils.h"
 #include "queue_manager.h"
 
 namespace {
+MethodType kMethodType = "textDocument/codeLens";
+
 struct lsDocumentCodeLensParams {
   lsTextDocumentIdentifier textDocument;
 };
 MAKE_REFLECT_STRUCT(lsDocumentCodeLensParams, textDocument);
 
-struct lsCodeLensUserData {};
-MAKE_REFLECT_EMPTY_STRUCT(lsCodeLensUserData);
-
-struct lsCodeLensCommandArguments {
-  lsDocumentUri uri;
-  lsPosition position;
-  std::vector<lsLocation> locations;
-};
-void Reflect(Writer& visitor, lsCodeLensCommandArguments& value) {
-  visitor.StartArray(3);
-  Reflect(visitor, value.uri);
-  Reflect(visitor, value.position);
-  Reflect(visitor, value.locations);
-  visitor.EndArray();
-}
-#if false
-void Reflect(Reader& visitor, lsCodeLensCommandArguments& value) {
-  auto it = visitor.Begin();
-  Reflect(*it, value.uri);
-  ++it;
-  Reflect(*it, value.position);
-  ++it;
-  Reflect(*it, value.locations);
-}
-#endif
-
 using TCodeLens = lsCodeLens<lsCodeLensUserData, lsCodeLensCommandArguments>;
-struct Ipc_TextDocumentCodeLens
-    : public RequestMessage<Ipc_TextDocumentCodeLens> {
-  const static IpcId kIpcId = IpcId::TextDocumentCodeLens;
+struct In_TextDocumentCodeLens : public RequestInMessage {
+  MethodType GetMethodType() const override { return kMethodType; }
   lsDocumentCodeLensParams params;
 };
-MAKE_REFLECT_STRUCT(Ipc_TextDocumentCodeLens, id, params);
-REGISTER_IPC_MESSAGE(Ipc_TextDocumentCodeLens);
+MAKE_REFLECT_STRUCT(In_TextDocumentCodeLens, id, params);
+REGISTER_IN_MESSAGE(In_TextDocumentCodeLens);
 
 struct Out_TextDocumentCodeLens
     : public lsOutMessage<Out_TextDocumentCodeLens> {
@@ -52,23 +28,6 @@ struct Out_TextDocumentCodeLens
 };
 MAKE_REFLECT_STRUCT(Out_TextDocumentCodeLens, jsonrpc, id, result);
 
-#if false
-struct Ipc_CodeLensResolve : public IpcMessage<Ipc_CodeLensResolve> {
-  const static IpcId kIpcId = IpcId::CodeLensResolve;
-
-  lsRequestId id;
-  TCodeLens params;
-};
-MAKE_REFLECT_STRUCT(Ipc_CodeLensResolve, id, params);
-REGISTER_IPC_MESSAGE(Ipc_CodeLensResolve);
-
-struct Out_CodeLensResolve : public lsOutMessage<Out_CodeLensResolve> {
-  lsRequestId id;
-  TCodeLens result;
-};
-MAKE_REFLECT_STRUCT(Out_CodeLensResolve, jsonrpc, id, result);
-#endif
-
 struct CommonCodeLensParams {
   std::vector<TCodeLens>* result;
   QueryDatabase* db;
@@ -76,33 +35,34 @@ struct CommonCodeLensParams {
   WorkingFile* working_file;
 };
 
-SymbolRef OffsetStartColumn(SymbolRef sym, int16_t offset) {
-  sym.range.start.column += offset;
-  return sym;
+Use OffsetStartColumn(Use use, int16_t offset) {
+  use.range.start.column += offset;
+  return use;
 }
 
 void AddCodeLens(const char* singular,
                  const char* plural,
                  CommonCodeLensParams* common,
-                 SymbolRef loc,
-                 const std::vector<Reference>& uses,
+                 Use use,
+                 const std::vector<Use>& uses,
                  bool force_display) {
   TCodeLens code_lens;
-  optional<lsRange> range = GetLsRange(common->working_file, loc.range);
+  optional<lsRange> range = GetLsRange(common->working_file, use.range);
   if (!range)
+    return;
+  if (use.file == QueryFileId())
     return;
   code_lens.range = *range;
   code_lens.command = lsCommand<lsCodeLensCommandArguments>();
   code_lens.command->command = "cquery.showReferences";
-  code_lens.command->arguments.uri =
-      GetLsDocumentUri(common->db, common->db->GetFileId(loc));
+  code_lens.command->arguments.uri = GetLsDocumentUri(common->db, use.file);
   code_lens.command->arguments.position = code_lens.range.start;
 
   // Add unique uses.
   std::unordered_set<lsLocation> unique_uses;
-  for (const Reference& use : uses) {
+  for (Use use1 : uses) {
     optional<lsLocation> location =
-        GetLsLocation(common->db, common->working_files, use);
+        GetLsLocation(common->db, common->working_files, use1);
     if (!location)
       continue;
     unique_uses.insert(*location);
@@ -122,9 +82,10 @@ void AddCodeLens(const char* singular,
     common->result->push_back(code_lens);
 }
 
-struct TextDocumentCodeLensHandler
-    : BaseMessageHandler<Ipc_TextDocumentCodeLens> {
-  void Run(Ipc_TextDocumentCodeLens* request) override {
+struct Handler_TextDocumentCodeLens
+    : BaseMessageHandler<In_TextDocumentCodeLens> {
+  MethodType GetMethodType() const override { return kMethodType; }
+  void Run(In_TextDocumentCodeLens* request) override {
     Out_TextDocumentCodeLens out;
     out.id = request->id;
 
@@ -148,25 +109,28 @@ struct TextDocumentCodeLensHandler
     for (SymbolRef sym : file->def->outline) {
       // NOTE: We OffsetColumn so that the code lens always show up in a
       // predictable order. Otherwise, the client may randomize it.
+      Use use(sym.range, sym.id, sym.kind, sym.role, file->def->file);
 
       switch (sym.kind) {
         case SymbolKind::Type: {
           QueryType& type = db->GetType(sym);
-          if (!type.def)
+          const QueryType::Def* def = type.AnyDef();
+          if (!def || def->kind == lsSymbolKind::Namespace)
             continue;
-          if (type.def->kind == ClangSymbolKind::Namespace)
-            continue;
-          AddCodeLens("ref", "refs", &common, OffsetStartColumn(sym, 0),
+          AddCodeLens("ref", "refs", &common, OffsetStartColumn(use, 0),
                       type.uses, true /*force_display*/);
-          AddCodeLens("derived", "derived", &common, OffsetStartColumn(sym, 1),
-                      ToReference(db, type.derived), false /*force_display*/);
-          AddCodeLens("var", "vars", &common, OffsetStartColumn(sym, 2),
-                      ToReference(db, type.instances), false /*force_display*/);
+          AddCodeLens("derived", "derived", &common, OffsetStartColumn(use, 1),
+                      GetDeclarations(db, type.derived),
+                      false /*force_display*/);
+          AddCodeLens("var", "vars", &common, OffsetStartColumn(use, 2),
+                      GetDeclarations(db, type.instances),
+                      false /*force_display*/);
           break;
         }
         case SymbolKind::Func: {
           QueryFunc& func = db->GetFunc(sym);
-          if (!func.def)
+          const QueryFunc::Def* def = func.AnyDef();
+          if (!def)
             continue;
 
           int16_t offset = 0;
@@ -174,49 +138,44 @@ struct TextDocumentCodeLensHandler
           // For functions, the outline will report a location that is using the
           // extent since that is better for outline. This tries to convert the
           // extent location to the spelling location.
-          auto try_ensure_spelling = [&](SymbolRef sym) {
-            Maybe<Reference> def = GetDefinitionSpellingOfSymbol(db, sym);
-            if (!def || db->GetFileId(*def) != db->GetFileId(sym) ||
-                def->range.start.line != sym.range.start.line) {
-              return sym;
+          auto try_ensure_spelling = [&](Use use) {
+            Maybe<Use> def = GetDefinitionSpell(db, use);
+            if (!def || def->range.start.line != use.range.start.line) {
+              return use;
             }
-            return SymbolRef(*def);
+            return *def;
           };
 
-          std::vector<QueryFuncRef> base_callers =
-              GetCallersForAllBaseFunctions(db, func);
-          std::vector<QueryFuncRef> derived_callers =
-              GetCallersForAllDerivedFunctions(db, func);
+          std::vector<Use> base_callers = GetUsesForAllBases(db, func);
+          std::vector<Use> derived_callers = GetUsesForAllDerived(db, func);
           if (base_callers.empty() && derived_callers.empty()) {
-            SymbolRef loc = try_ensure_spelling(sym);
+            Use loc = try_ensure_spelling(use);
             AddCodeLens("call", "calls", &common,
-                        OffsetStartColumn(loc, offset++),
-                        ToReference(db, func.callers), true /*force_display*/);
+                        OffsetStartColumn(loc, offset++), func.uses,
+                        true /*force_display*/);
           } else {
-            SymbolRef loc = try_ensure_spelling(sym);
+            Use loc = try_ensure_spelling(use);
             AddCodeLens("direct call", "direct calls", &common,
-                        OffsetStartColumn(loc, offset++),
-                        ToReference(db, func.callers), false /*force_display*/);
+                        OffsetStartColumn(loc, offset++), func.uses,
+                        false /*force_display*/);
             if (!base_callers.empty())
               AddCodeLens("base call", "base calls", &common,
-                          OffsetStartColumn(loc, offset++),
-                          ToReference(db, base_callers),
+                          OffsetStartColumn(loc, offset++), base_callers,
                           false /*force_display*/);
             if (!derived_callers.empty())
               AddCodeLens("derived call", "derived calls", &common,
-                          OffsetStartColumn(loc, offset++),
-                          ToReference(db, derived_callers),
+                          OffsetStartColumn(loc, offset++), derived_callers,
                           false /*force_display*/);
           }
 
-          AddCodeLens("derived", "derived", &common,
-                      OffsetStartColumn(sym, offset++),
-                      ToReference(db, func.derived), false /*force_display*/);
+          AddCodeLens(
+              "derived", "derived", &common, OffsetStartColumn(use, offset++),
+              GetDeclarations(db, func.derived), false /*force_display*/);
 
           // "Base"
-          if (func.def->base.size() == 1) {
-            Maybe<Reference> base_loc =
-                GetDefinitionSpellingOfSymbol(db, func.def->base[0]);
+          if (def->bases.size() == 1) {
+            Maybe<Use> base_loc = GetDefinitionSpell(
+                db, SymbolIdx{def->bases[0], SymbolKind::Func});
             if (base_loc) {
               optional<lsLocation> ls_base =
                   GetLsLocation(db, working_files, *base_loc);
@@ -237,8 +196,8 @@ struct TextDocumentCodeLensHandler
               }
             }
           } else {
-            AddCodeLens("base", "base", &common, OffsetStartColumn(sym, 1),
-                        ToReference(db, func.def->base),
+            AddCodeLens("base", "base", &common, OffsetStartColumn(use, 1),
+                        GetDeclarations(db, def->bases),
                         false /*force_display*/);
           }
 
@@ -246,19 +205,17 @@ struct TextDocumentCodeLensHandler
         }
         case SymbolKind::Var: {
           QueryVar& var = db->GetVar(sym);
-          if (!var.def)
-            continue;
-
-          if (var.def->is_local() && !config->codeLensOnLocalVariables)
+          const QueryVar::Def* def = var.AnyDef();
+          if (!def || (def->is_local() && !config->codeLens.localVariables))
             continue;
 
           bool force_display = true;
           // Do not show 0 refs on macro with no uses, as it is most likely
           // a header guard.
-          if (var.def->is_macro())
+          if (def->kind == lsSymbolKind::Macro)
             force_display = false;
 
-          AddCodeLens("ref", "refs", &common, OffsetStartColumn(sym, 0),
+          AddCodeLens("ref", "refs", &common, OffsetStartColumn(use, 0),
                       var.uses, force_display);
           break;
         }
@@ -270,8 +227,8 @@ struct TextDocumentCodeLensHandler
       };
     }
 
-    QueueManager::WriteStdout(IpcId::TextDocumentCodeLens, out);
+    QueueManager::WriteStdout(kMethodType, out);
   }
 };
-REGISTER_MESSAGE_HANDLER(TextDocumentCodeLensHandler);
+REGISTER_MESSAGE_HANDLER(Handler_TextDocumentCodeLens);
 }  // namespace

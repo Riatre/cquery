@@ -17,11 +17,10 @@ OUTPUT:
       "short_name": "FOO",
       "hover": "#define FOO",
       "declarations": [],
-      "definition_spelling": "2:9-2:12",
-      "definition_extent": "2:9-2:12",
+      "spell": "2:9-2:12|-1|1|2",
+      "extent": "2:9-2:12|-1|1|0",
       "uses": [],
-      "parent_kind": 0,
-      "kind": 4,
+      "kind": 255,
       "storage": 0
     }]
 }

@@ -16,16 +16,17 @@ OUTPUT:
       "usr": 13420564603121289209,
       "detailed_name": "T",
       "short_name": "T",
-      "kind": 25,
-      "definition_spelling": "1:19-1:20",
-      "definition_extent": "1:10-1:20",
-      "parents": [],
+      "kind": 26,
+      "declarations": [],
+      "spell": "1:19-1:20|0|3|2",
+      "extent": "1:10-1:20|0|3|0",
+      "bases": [],
       "derived": [],
       "types": [],
       "funcs": [],
       "vars": [],
       "instances": [],
-      "uses": ["2:13-2:14"]
+      "uses": ["2:13-2:14|-1|1|4"]
     }],
   "funcs": [{
       "id": 0,
@@ -35,15 +36,13 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [{
-          "spelling": "2:6-2:12",
-          "extent": "2:1-2:15",
-          "content": "void accept(T)",
+          "spell": "2:6-2:12|-1|1|1",
           "param_spellings": ["2:14-2:14"]
         }],
-      "base": [],
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": ["1@5:3-5:9", "1@6:3-6:9"],
+      "vars": [],
+      "uses": ["5:3-5:9|1|3|32", "6:3-6:9|1|3|32"],
       "callees": []
     }, {
       "id": 1,
@@ -53,13 +52,13 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [],
-      "definition_spelling": "4:6-4:9",
-      "definition_extent": "4:1-7:2",
-      "base": [],
+      "spell": "4:6-4:9|-1|1|2",
+      "extent": "4:1-7:2|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
-      "callees": ["0@5:3-5:9", "0@6:3-6:9"]
+      "vars": [],
+      "uses": [],
+      "callees": ["5:3-5:9|0|3|32", "6:3-6:9|0|3|32"]
     }],
   "vars": []
 }

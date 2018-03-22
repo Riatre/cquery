@@ -4,10 +4,9 @@
 
 #include <algorithm>
 #include <functional>
-#include <memory>
 #include <iterator>
+#include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 // Trim from start (in place)
@@ -33,7 +32,8 @@ bool EndsWithAny(const std::string& value,
                  const std::vector<std::string>& endings);
 bool FindAnyPartial(const std::string& value,
                     const std::vector<std::string>& values);
-// Returns the dirname of |path|, i.e. "foo/bar.cc" => "foo", "foo" => ".", "/foo" => "/".
+// Returns the dirname of |path|, i.e. "foo/bar.cc" => "foo", "foo" => ".",
+// "/foo" => "/".
 std::string GetDirName(std::string path);
 // Returns the basename of |path|, ie, "foo/bar.cc" => "bar.cc".
 std::string GetBaseName(const std::string& path);
@@ -109,26 +109,7 @@ struct TextReplacer {
   std::string Apply(const std::string& content);
 };
 
-void ParseTestExpectation(
-    const std::string& filename,
-    const std::vector<std::string>& lines_with_endings,
-    TextReplacer* text_replacer,
-    std::vector<std::string>* flags,
-    std::unordered_map<std::string, std::string>* output_sections);
-
-void UpdateTestExpectation(const std::string& filename,
-                           const std::string& expectation,
-                           const std::string& actual);
-
 void WriteToFile(const std::string& filename, const std::string& content);
-
-// note: this implementation does not disable this overload for array types
-// See
-// http://en.cppreference.com/w/cpp/memory/unique_ptr/make_unique#Possible_Implementatiog
-template <typename T, typename... Args>
-std::unique_ptr<T> MakeUnique(Args&&... args) {
-  return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
-}
 
 template <typename T>
 void AddRange(std::vector<T>* dest, const std::vector<T>& to_add) {
@@ -139,18 +120,6 @@ template <typename T>
 void AddRange(std::vector<T>* dest, std::vector<T>&& to_add) {
   dest->insert(dest->end(), std::make_move_iterator(to_add.begin()),
                std::make_move_iterator(to_add.end()));
-}
-
-template <typename T>
-void RemoveRange(std::vector<T>* dest, const std::vector<T>& to_remove) {
-  dest->erase(std::remove_if(dest->begin(), dest->end(),
-                             [&](const T& t) {
-                               // TODO: make to_remove a set?
-                               return std::find(to_remove.begin(),
-                                                to_remove.end(),
-                                                t) != to_remove.end();
-                             }),
-              dest->end());
 }
 
 // http://stackoverflow.com/a/38140932

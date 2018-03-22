@@ -18,15 +18,13 @@ OUTPUT: simple_header.h
       "kind": 12,
       "storage": 1,
       "declarations": [{
-          "spelling": "3:6-3:12",
-          "extent": "3:1-3:14",
-          "content": "void header()",
+          "spell": "3:6-3:12|-1|1|1",
           "param_spellings": []
         }],
-      "base": [],
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
+      "vars": [],
+      "uses": [],
       "callees": []
     }],
   "vars": []
@@ -47,13 +45,13 @@ OUTPUT: simple_impl.cc
       "kind": 12,
       "storage": 1,
       "declarations": [],
-      "definition_spelling": "3:6-3:10",
-      "definition_extent": "3:1-5:2",
-      "base": [],
+      "spell": "3:6-3:10|-1|1|2",
+      "extent": "3:1-5:2|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
-      "callees": ["1@4:3-4:9"]
+      "vars": [],
+      "uses": [],
+      "callees": ["4:3-4:9|1|3|32"]
     }, {
       "id": 1,
       "usr": 16236105532929924676,
@@ -62,10 +60,10 @@ OUTPUT: simple_impl.cc
       "kind": 0,
       "storage": 0,
       "declarations": [],
-      "base": [],
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": ["0@4:3-4:9"],
+      "vars": [],
+      "uses": ["4:3-4:9|0|3|32"],
       "callees": []
     }],
   "vars": []

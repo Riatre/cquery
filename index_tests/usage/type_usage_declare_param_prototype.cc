@@ -18,14 +18,15 @@ OUTPUT:
       "usr": 15041163540773201510,
       "detailed_name": "Foo",
       "short_name": "Foo",
-      "kind": 0,
-      "parents": [],
+      "kind": 23,
+      "declarations": ["1:8-1:11|-1|1|1"],
+      "bases": [],
       "derived": [],
       "types": [],
       "funcs": [],
       "vars": [],
       "instances": [0],
-      "uses": ["1:8-1:11", "3:10-3:13", "3:18-3:21", "4:10-4:13", "4:18-4:21"]
+      "uses": ["3:10-3:13|-1|1|4", "3:18-3:21|-1|1|4", "4:10-4:13|-1|1|4", "4:18-4:21|-1|1|4"]
     }],
   "funcs": [{
       "id": 0,
@@ -35,17 +36,15 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [{
-          "spelling": "3:6-3:9",
-          "extent": "3:1-3:23",
-          "content": "void foo(Foo* f, Foo*)",
+          "spell": "3:6-3:9|-1|1|1",
           "param_spellings": ["3:15-3:16", "3:22-3:22"]
         }],
-      "definition_spelling": "4:6-4:9",
-      "definition_extent": "4:1-4:26",
-      "base": [],
+      "spell": "4:6-4:9|-1|1|2",
+      "extent": "4:1-4:26|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
+      "vars": [0],
+      "uses": [],
       "callees": []
     }],
   "vars": [{
@@ -54,13 +53,11 @@ OUTPUT:
       "detailed_name": "Foo *f",
       "short_name": "f",
       "declarations": [],
-      "definition_spelling": "4:15-4:16",
-      "definition_extent": "4:10-4:16",
-      "variable_type": 0,
+      "spell": "4:15-4:16|0|3|2",
+      "extent": "4:10-4:16|0|3|0",
+      "type": 0,
       "uses": [],
-      "parent_id": 0,
-      "parent_kind": 3,
-      "kind": 25,
+      "kind": 253,
       "storage": 1
     }]
 }

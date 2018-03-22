@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nt_string.h"
 #include "position.h"
 
 #include <clang-c/Index.h>
@@ -24,12 +25,17 @@ class ClangType {
   bool operator==(const ClangType& rhs) const;
 
   // Returns true if this is a fundamental type like int.
-  bool is_fundamental() const;
+  bool is_builtin() const {
+    // NOTE: This will return false for pointed types. Should we call
+    //       strip_qualifiers for the user?
+    return cx_type.kind >= CXType_FirstBuiltin &&
+           cx_type.kind <= CXType_LastBuiltin;
+  }
 
   ClangCursor get_declaration() const;
   std::string get_usr() const;
   Usr get_usr_hash() const;
-  std::string get_spelling() const;
+  std::string get_spell_name() const;
   ClangType get_canonical() const;
 
   // Try to resolve this type and remove qualifies, ie, Foo* will become Foo
@@ -53,8 +59,8 @@ class ClangCursor {
 
   CXCursorKind get_kind() const;
   ClangType get_type() const;
-  std::string get_spelling() const;
-  Range get_spelling_range(CXFile* cx_file = nullptr) const;
+  std::string get_spell_name() const;
+  Range get_spell(CXFile* cx_file = nullptr) const;
   Range get_extent() const;
   std::string get_display_name() const;
   std::string get_usr() const;
@@ -73,12 +79,13 @@ class ClangCursor {
   ClangCursor get_referenced() const;
   ClangCursor get_canonical() const;
   ClangCursor get_definition() const;
+  ClangCursor get_lexical_parent() const;
   ClangCursor get_semantic_parent() const;
   std::vector<ClangCursor> get_arguments() const;
   bool is_valid_kind() const;
 
   std::string get_type_description() const;
-  std::string get_comments() const;
+  NtString get_comments() const;
 
   std::string ToString() const;
 

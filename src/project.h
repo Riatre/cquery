@@ -1,14 +1,19 @@
 #pragma once
 
 #include "config.h"
+#include "method.h"
 
 #include <optional.h>
 #include <sparsepp/spp.h>
+#include <variant.h>
 
 #include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
+
+class QueueManager;
+struct WorkingFiles;
 
 struct Project {
   struct Entry {
@@ -28,24 +33,34 @@ struct Project {
 
   // Loads a project for the given |directory|.
   //
-  // If |opt_compilation_db_dir| is not empty, the compile_commands.json
-  // file in it will be used to discover all files and args. If it's empty and
-  // |root_directory| contains a compile_commands.json file, that one will be
-  // used instead. Otherwise, a recursive directory listing of all *.cpp, *.cc,
-  // *.h, and *.hpp files will be used. clang arguments can be specified in a
-  // .cquery file located inside of |root_directory|.
-  void Load(Config* init_opts,
-            const std::vector<std::string>& extra_flags,
-            const std::string& opt_compilation_db_dir,
-            const std::string& root_directory,
-            const std::string& resource_directory);
+  // If |config->compilationDatabaseDirectory| is not empty, look for .cquery or
+  // compile_commands.json in it, otherwise they are retrieved in
+  // |root_directory|.
+  // For .cquery, recursive directory listing is used and files with known
+  // suffixes are indexed. .cquery files can exist in subdirectories and they
+  // will affect flags in their subtrees (relative paths are relative to the
+  // project root, not subdirectories). For compile_commands.json, its entries
+  // are indexed.
+  void Load(Config* config, const std::string& root_directory);
 
   // Lookup the CompilationEntry for |filename|. If no entry was found this
   // will infer one based on existing project structure.
   Entry FindCompilationEntryForFile(const std::string& filename);
 
+  // If the client has overridden the flags, or specified them for a file
+  // that is not in the compilation_database.json make sure those changes
+  // are permanent.
+  void SetFlagsForFile(
+      const std::vector<std::string>& flags,
+      const std::string& path);
+
   // Run |action| on every file in the project.
   void ForAllFilteredFiles(
       Config* config,
       std::function<void(int i, const Entry& entry)> action);
+
+  void Index(Config* config,
+             QueueManager* queue,
+             WorkingFiles* wfiles,
+             lsRequestId id);
 };

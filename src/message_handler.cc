@@ -11,6 +11,19 @@
 #include <algorithm>
 
 namespace {
+
+struct Out_CquerySetInactiveRegion
+    : public lsOutMessage<Out_CquerySetInactiveRegion> {
+  struct Params {
+    lsDocumentUri uri;
+    std::vector<lsRange> inactiveRegions;
+  };
+  std::string method = "$cquery/setInactiveRegions";
+  Params params;
+};
+MAKE_REFLECT_STRUCT(Out_CquerySetInactiveRegion::Params, uri, inactiveRegions);
+MAKE_REFLECT_STRUCT(Out_CquerySetInactiveRegion, jsonrpc, method, params);
+
 struct ScanLineEvent {
   lsPosition pos;
   lsPosition end_pos;  // Second key when there is a tie for insertion events.
@@ -18,7 +31,13 @@ struct ScanLineEvent {
   Out_CqueryPublishSemanticHighlighting::Symbol* symbol;
   bool operator<(const ScanLineEvent& other) const {
     // See the comments below when insertion/deletion events are inserted.
-    return !(pos == other.pos) ? pos < other.pos : other.end_pos < end_pos;
+    if (!(pos == other.pos))
+      return pos < other.pos;
+    if (!(other.end_pos == end_pos))
+      return other.end_pos < end_pos;
+    // This comparison essentially order Macro after non-Macro,
+    // So that macros will not be rendered as Var/Type/...
+    return symbol->kind < other.symbol->kind;
   }
 };
 }  // namespace
@@ -80,7 +99,7 @@ bool FindFileOrFail(QueryDatabase* db,
       out.error.code = lsErrorCodes::InternalError;
       out.error.message = "Unable to find file " + absolute_path;
     }
-    QueueManager::WriteStdout(IpcId::Unknown, out);
+    QueueManager::WriteStdout(kMethodType_Unknown, out);
   }
 
   return false;
@@ -95,7 +114,7 @@ void EmitInactiveLines(WorkingFile* working_file,
     if (ls_skipped)
       out.params.inactiveRegions.push_back(*ls_skipped);
   }
-  QueueManager::WriteStdout(IpcId::CqueryPublishInactiveRegions, out);
+  QueueManager::WriteStdout(kMethodType_CqueryPublishInactiveRegions, out);
 }
 
 void EmitSemanticHighlighting(QueryDatabase* db,
@@ -103,6 +122,8 @@ void EmitSemanticHighlighting(QueryDatabase* db,
                               WorkingFile* working_file,
                               QueryFile* file) {
   assert(file->def);
+  if (!semantic_cache->match_->IsMatch(file->def->path))
+    return;
   auto semantic_cache_for_file =
       semantic_cache->GetCacheForFile(file->def->path);
 
@@ -111,22 +132,34 @@ void EmitSemanticHighlighting(QueryDatabase* db,
       grouped_symbols;
   for (SymbolRef sym : file->def->all_symbols) {
     std::string_view detailed_name;
-    SymbolKind parent_kind = SymbolKind::Invalid;
-    ClangSymbolKind kind = ClangSymbolKind::Unknown;
+    lsSymbolKind parent_kind = lsSymbolKind::Unknown;
+    lsSymbolKind kind = lsSymbolKind::Unknown;
     StorageClass storage = StorageClass::Invalid;
     // This switch statement also filters out symbols that are not highlighted.
     switch (sym.kind) {
       case SymbolKind::Func: {
-        QueryFunc& func = db->GetFunc(sym);
-        if (!func.def)
+        const QueryFunc& func = db->GetFunc(sym);
+        const QueryFunc::Def* def = func.AnyDef();
+        if (!def)
           continue;  // applies to for loop
+        if (def->spell)
+          parent_kind = GetSymbolKind(db, *def->spell);
+        if (parent_kind == lsSymbolKind::Unknown) {
+          for (Use use : func.declarations) {
+            parent_kind = GetSymbolKind(db, use);
+            break;
+          }
+        }
         // Don't highlight overloadable operators or implicit lambda ->
         // std::function constructor.
-        std::string_view short_name = func.def->ShortName();
+        std::string_view short_name = def->ShortName();
         if (short_name.compare(0, 8, "operator") == 0 ||
             short_name.compare(0, 27, "function<type-parameter-0-0") == 0)
           continue;  // applies to for loop
-        kind = func.def->kind;
+        if (def->spell)
+          parent_kind = GetSymbolKind(db, *def->spell);
+        kind = def->kind;
+        storage = def->storage;
         detailed_name = short_name;
 
         // Check whether the function name is actually there.
@@ -140,29 +173,41 @@ void EmitSemanticHighlighting(QueryDatabase* db,
         if (start_line >= 0 && start_line < working_file->index_lines.size()) {
           std::string_view line = working_file->index_lines[start_line];
           sym.range.end.line = start_line;
-          if (line.compare(start_col, concise_name.size(), concise_name) == 0)
+          if (start_col + concise_name.size() <= line.size() &&
+              line.compare(start_col, concise_name.size(), concise_name) == 0)
             sym.range.end.column = start_col + concise_name.size();
           else
             continue;  // applies to for loop
         }
         break;
       }
-      case SymbolKind::Var: {
-        QueryVar& var = db->GetVar(sym);
-        if (!var.def)
-          continue;  // applies to for loop
-        parent_kind = var.def->parent_kind;
-        kind = var.def->kind;
-        storage = var.def->storage;
-        detailed_name = var.def->ShortName();
+      case SymbolKind::Type:
+        for (auto& def : db->GetType(sym).def) {
+          kind = def.kind;
+          detailed_name = def.detailed_name;
+          if (def.spell) {
+            parent_kind = GetSymbolKind(db, *def.spell);
+            break;
+          }
+        }
         break;
-      }
-      case SymbolKind::Type: {
-        QueryType& type = db->GetType(sym);
-        if (!type.def)
-          continue;  // applies to for loop
-        kind = type.def->kind;
-        detailed_name = type.def->detailed_name;
+      case SymbolKind::Var: {
+        const QueryVar& var = db->GetVar(sym);
+        for (auto& def : var.def) {
+          kind = def.kind;
+          storage = def.storage;
+          detailed_name = def.detailed_name;
+          if (def.spell) {
+            parent_kind = GetSymbolKind(db, *def.spell);
+            break;
+          }
+        }
+        if (parent_kind == lsSymbolKind::Unknown) {
+          for (Use use : var.declarations) {
+            parent_kind = GetSymbolKind(db, use);
+            break;
+          }
+        }
         break;
       }
       default:
@@ -171,8 +216,7 @@ void EmitSemanticHighlighting(QueryDatabase* db,
 
     optional<lsRange> loc = GetLsRange(working_file, sym.range);
     if (loc) {
-      auto key = SymbolIdx{RawId(sym.id), sym.kind};
-      auto it = grouped_symbols.find(key);
+      auto it = grouped_symbols.find(sym);
       if (it != grouped_symbols.end()) {
         it->second.ranges.push_back(*loc);
       } else {
@@ -183,7 +227,7 @@ void EmitSemanticHighlighting(QueryDatabase* db,
         symbol.kind = kind;
         symbol.storage = storage;
         symbol.ranges.push_back(*loc);
-        grouped_symbols[key] = symbol;
+        grouped_symbols[sym] = symbol;
       }
     }
   }
@@ -233,7 +277,7 @@ void EmitSemanticHighlighting(QueryDatabase* db,
   for (auto& entry : grouped_symbols)
     if (entry.second.ranges.size())
       out.params.symbols.push_back(entry.second);
-  QueueManager::WriteStdout(IpcId::CqueryPublishSemanticHighlighting, out);
+  QueueManager::WriteStdout(kMethodType_CqueryPublishSemanticHighlighting, out);
 }
 
 bool ShouldIgnoreFileForIndexing(const std::string& path) {

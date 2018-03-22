@@ -1,21 +1,33 @@
 #include "project.h"
 
+#include "cache_manager.h"
 #include "clang_utils.h"
+#include "language.h"
 #include "match.h"
 #include "platform.h"
-#include "serializer.h"
+#include "queue_manager.h"
+#include "serializers/json.h"
 #include "timer.h"
 #include "utils.h"
+#include "working_files.h"
 
 #include <clang-c/CXCompilationDatabase.h>
 #include <doctest/doctest.h>
+#include <rapidjson/writer.h>
 #include <loguru.hpp>
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
+
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <sstream>
 #include <unordered_set>
 #include <vector>
+
+extern bool gTestOutputMode;
 
 struct CompileCommandsEntry {
   std::string directory;
@@ -46,9 +58,11 @@ bool IsWindowsAbsolutePath(const std::string& path) {
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
   };
 
-  return path.size() > 3 && path[1] == ':' && path[2] == '/' &&
-         is_drive_letter(path[0]);
+  return path.size() > 3 && path[1] == ':' &&
+         (path[2] == '/' || path[2] == '\\') && is_drive_letter(path[0]);
 }
+
+enum class ProjectMode { CompileCommandsJson, DotCquery, ExternalCommand };
 
 struct ProjectConfig {
   std::unordered_set<std::string> quote_dirs;
@@ -56,6 +70,7 @@ struct ProjectConfig {
   std::vector<std::string> extra_flags;
   std::string project_dir;
   std::string resource_dir;
+  ProjectMode mode = ProjectMode::CompileCommandsJson;
 };
 
 // TODO: See
@@ -73,7 +88,8 @@ std::vector<std::string> kBlacklist = {
 std::vector<std::string> kPathArgs = {
     "-I",        "-iquote",        "-isystem",     "--sysroot=",
     "-isysroot", "-gcc-toolchain", "-include-pch", "-iframework",
-    "-F",        "-imacros",       "-include"};
+    "-F",        "-imacros",       "-include",     "/I",
+    "-idirafter"};
 
 // Arguments which always require an absolute path, ie, clang -working-directory
 // does not work as expected. Argument processing assumes that this is a subset
@@ -83,7 +99,7 @@ std::vector<std::string> kNormalizePathArgs = {"--sysroot="};
 // Arguments whose path arguments should be injected into include dir lookup
 // for #include completion.
 std::vector<std::string> kQuoteIncludeArgs = {"-iquote"};
-std::vector<std::string> kAngleIncludeArgs = {"-I", "-isystem"};
+std::vector<std::string> kAngleIncludeArgs = {"-I", "/I", "-isystem"};
 
 bool ShouldAddToQuoteIncludes(const std::string& arg) {
   return StartsWithAny(arg, kQuoteIncludeArgs);
@@ -92,16 +108,16 @@ bool ShouldAddToAngleIncludes(const std::string& arg) {
   return StartsWithAny(arg, kAngleIncludeArgs);
 }
 
-optional<std::string> SourceFileType(const std::string& path) {
+LanguageId SourceFileLanguage(const std::string& path) {
   if (EndsWith(path, ".c"))
-    return std::string("c");
+    return LanguageId::C;
   else if (EndsWith(path, ".cpp") || EndsWith(path, ".cc"))
-    return std::string("c++");
+    return LanguageId::Cpp;
   else if (EndsWith(path, ".mm"))
-    return std::string("objective-c++");
+    return LanguageId::ObjCpp;
   else if (EndsWith(path, ".m"))
-    return std::string("objective-c");
-  return nullopt;
+    return LanguageId::ObjC;
+  return LanguageId::Unknown;
 }
 
 Project::Entry GetCompilationEntryFromCompileCommandEntry(
@@ -124,57 +140,79 @@ Project::Entry GetCompilationEntryFromCompileCommandEntry(
 
   Project::Entry result;
   result.filename = NormalizePathWithTestOptOut(entry.file);
-  std::string base_name = GetBaseName(entry.file);
+  const std::string base_name = GetBaseName(entry.file);
 
-  size_t i = 0;
-
-  // Strip all arguments consisting the compiler command,
-  // as there may be non-compiler related commands beforehand,
-  // ie, compiler schedular such as goma. This allows correct parsing for
-  // command lines like "goma clang -c foo".
-  std::string::size_type dot;
-  while (i < entry.args.size() && entry.args[i][0] != '-' &&
-         // Do not skip over main source filename
-         NormalizePathWithTestOptOut(entry.args[i]) != result.filename &&
-         // There may be other filenames (e.g. more than one source filenames)
-         // preceding main source filename. We use a heuristic here. `.` may
-         // occur in both command names and source filenames. If `.` occurs in
-         // the last 4 bytes of entry.args[i] and not followed by a digit, e.g.
-         // .c .cpp, We take it as a source filename. Others (like ./a/b/goma
-         // clang-4.0) are seen as commands.
-         ((dot = entry.args[i].rfind('.')) == std::string::npos ||
-          dot + 4 < entry.args[i].size() || isdigit(entry.args[i][dot + 1]) ||
-          !entry.args[i].compare(dot + 1, 3, "exe")))
-    ++i;
-  // Include the compiler in the args.
-  if (i > 0)
-    result.args.push_back(entry.args[i - 1]);
-  else {
-    // TODO Drop this back compatibility
-    // Args probably came from a /.cquery file, which likely has just flags.
-    // clang_parseTranslationUnit2FullArgv() expects the binary path as the
-    // first arg, so the first flag would end up being ignored. Add a dummy.
-    result.args.push_back("clang++");
+  // Expand %c %cpp %clang
+  std::vector<std::string> args;
+  const LanguageId lang = SourceFileLanguage(entry.file);
+  for (const std::string& arg : entry.args) {
+    if (arg.compare(0, 3, "%c ") == 0) {
+      if (lang == LanguageId::C)
+        args.push_back(arg.substr(3));
+    } else if (arg.compare(0, 5, "%cpp ") == 0) {
+      if (lang == LanguageId::Cpp)
+        args.push_back(arg.substr(5));
+    } else if (arg == "%clang") {
+      args.push_back(lang == LanguageId::Cpp ? "clang++" : "clang");
+    } else {
+      args.push_back(arg);
+    }
   }
+  if (args.empty())
+    return result;
+
+  std::string first_arg = args[0];
+  // Windows' filesystem is not case sensitive, so we compare only
+  // the lower case variant.
+  std::transform(first_arg.begin(), first_arg.end(), first_arg.begin(),
+                 tolower);
+  bool clang_cl = strstr(first_arg.c_str(), "clang-cl") ||
+                  strstr(first_arg.c_str(), "cl.exe");
+  // Clang only cares about the last --driver-mode flag, so the loop
+  // iterates in reverse to find the last one as soon as possible
+  // in case of multiple --driver-mode flags.
+  for (int i = args.size() - 1; i >= 0; --i) {
+    if (strstr(args[i].c_str(), "--dirver-mode=")) {
+      clang_cl = clang_cl || strstr(args[i].c_str(), "--driver-mode=cl");
+      break;
+    }
+  }
+  size_t i = 1;
+
+  // If |compilationDatabaseCommand| is specified, the external command provides
+  // us the JSON compilation database which should be strict. We should do very
+  // little processing on |args|.
+  if (config->mode != ProjectMode::ExternalCommand && !clang_cl) {
+    // Strip all arguments consisting the compiler command,
+    // as there may be non-compiler related commands beforehand,
+    // ie, compiler schedular such as goma. This allows correct parsing for
+    // command lines like "goma clang -c foo".
+    std::string::size_type dot;
+    while (i < args.size() && args[i][0] != '-' &&
+           // Do not skip over main source filename
+           NormalizePathWithTestOptOut(args[i]) != result.filename &&
+           // There may be other filenames (e.g. more than one source filenames)
+           // preceding main source filename. We use a heuristic here. `.` may
+           // occur in both command names and source filenames. If `.` occurs in
+           // the last 4 bytes of args[i] and not followed by a digit, e.g.
+           // .c .cpp, We take it as a source filename. Others (like ./a/b/goma
+           // clang-4.0) are seen as commands.
+           ((dot = args[i].rfind('.')) == std::string::npos ||
+            dot + 4 < args[i].size() || isdigit(args[i][dot + 1]) ||
+            !args[i].compare(dot + 1, 3, "exe")))
+      ++i;
+  }
+  // Compiler driver.
+  result.args.push_back(args[i - 1]);
 
   // Add -working-directory if not provided.
-  if (!AnyStartsWith(entry.args, "-working-directory")) {
-    result.args.emplace_back("-working-directory");
-    result.args.push_back(entry.directory);
-  }
+  if (!AnyStartsWith(args, "-working-directory"))
+    result.args.emplace_back("-working-directory=" + entry.directory);
 
-  // Clang does not have good hueristics for determining source language, we
-  // should explicitly specify it.
-  if (optional<std::string> file_type = SourceFileType(entry.file)) {
-    if (!AnyStartsWith(entry.args, "-x")) {
-      result.args.push_back("-x" + *file_type);
-    }
-    if (!AnyStartsWith(entry.args, "-std=")) {
-      if (*file_type == "c")
-        result.args.push_back("-std=gnu11");
-      else if (*file_type == "c++")
-        result.args.push_back("-std=c++14");
-    }
+  if (!gTestOutputMode) {
+    std::vector<const char*> platform = GetPlatformClangArguments();
+    for (auto arg : platform)
+      result.args.push_back(arg);
   }
 
   bool next_flag_is_path = false;
@@ -184,9 +222,9 @@ Project::Entry GetCompilationEntryFromCompileCommandEntry(
   // Note that when processing paths, some arguments support multiple forms, ie,
   // {"-Ifoo"} or {"-I", "foo"}.  Support both styles.
 
-  result.args.reserve(entry.args.size() + config->extra_flags.size());
-  for (; i < entry.args.size(); ++i) {
-    std::string arg = entry.args[i];
+  result.args.reserve(args.size() + config->extra_flags.size());
+  for (; i < args.size(); ++i) {
+    std::string arg = args[i];
 
     // If blacklist skip.
     if (!next_flag_is_path) {
@@ -206,13 +244,13 @@ Project::Entry GetCompilationEntryFromCompileCommandEntry(
         config->quote_dirs.insert(normalized_arg);
       if (add_next_flag_to_angle_dirs)
         config->angle_dirs.insert(normalized_arg);
+      if (clang_cl)
+        arg = normalized_arg;
 
       next_flag_is_path = false;
       add_next_flag_to_quote_dirs = false;
       add_next_flag_to_angle_dirs = false;
-    }
-
-    else {
+    } else {
       // Check to see if arg is a path and needs to be updated.
       for (const std::string& flag_type : kPathArgs) {
         // {"-I", "foo"} style.
@@ -228,7 +266,7 @@ Project::Entry GetCompilationEntryFromCompileCommandEntry(
           std::string path = arg.substr(flag_type.size());
           assert(!path.empty());
           path = cleanup_maybe_relative_path(path);
-          if (StartsWithAny(arg, kNormalizePathArgs))
+          if (clang_cl || StartsWithAny(arg, kNormalizePathArgs))
             arg = flag_type + path;
           if (ShouldAddToQuoteIncludes(flag_type))
             config->quote_dirs.insert(path);
@@ -238,7 +276,10 @@ Project::Entry GetCompilationEntryFromCompileCommandEntry(
         }
       }
 
-      // This is most likely the file path we will be passing to clang.
+      // This is most likely the file path we will be passing to clang. The
+      // path needs to be absolute, otherwise clang_codeCompleteAt is extremely
+      // slow. See
+      // https://github.com/cquery-project/cquery/commit/af63df09d57d765ce12d40007bf56302a0446678.
       if (EndsWith(arg, base_name))
         arg = cleanup_maybe_relative_path(arg);
       // TODO Exclude .a .o to make link command in compile_commands.json work.
@@ -265,7 +306,7 @@ Project::Entry GetCompilationEntryFromCompileCommandEntry(
   if (!AnyStartsWith(result.args, "-Wno-unknown-warning-option"))
     result.args.push_back("-Wno-unknown-warning-option");
 
-  // Using -fparse-all-comments enables documententation in the indexer and in
+  // Using -fparse-all-comments enables documentation in the indexer and in
   // code completion.
   if (init_opts->index.comments > 1 &&
       !AnyStartsWith(result.args, "-fparse-all-comments")) {
@@ -290,6 +331,7 @@ std::vector<std::string> ReadCompilerArgumentsFromFile(
 std::vector<Project::Entry> LoadFromDirectoryListing(Config* init_opts,
                                                      ProjectConfig* config) {
   std::vector<Project::Entry> result;
+  config->mode = ProjectMode::DotCquery;
   LOG_IF_S(WARNING, !FileExists(config->project_dir + "/.cquery") &&
                         config->extra_flags.empty())
       << "cquery has no clang arguments. Considering adding either a "
@@ -299,17 +341,17 @@ std::vector<Project::Entry> LoadFromDirectoryListing(Config* init_opts,
   std::unordered_map<std::string, std::vector<std::string>> folder_args;
   std::vector<std::string> files;
 
-  GetFilesInFolder(
-      config->project_dir, true /*recursive*/, true /*add_folder_to_path*/,
-      [&folder_args, &files](const std::string& path) {
-        if (SourceFileType(path)) {
-          files.push_back(path);
-        } else if (GetBaseName(path) == ".cquery") {
-          LOG_S(INFO) << "Using .cquery arguments from " << path;
-          folder_args.emplace(GetDirName(path),
-                              ReadCompilerArgumentsFromFile(path));
-        }
-      });
+  GetFilesInFolder(config->project_dir, true /*recursive*/,
+                   true /*add_folder_to_path*/,
+                   [&folder_args, &files](const std::string& path) {
+                     if (SourceFileLanguage(path) != LanguageId::Unknown) {
+                       files.push_back(path);
+                     } else if (GetBaseName(path) == ".cquery") {
+                       LOG_S(INFO) << "Using .cquery arguments from " << path;
+                       folder_args.emplace(GetDirName(path),
+                                           ReadCompilerArgumentsFromFile(path));
+                     }
+                   });
 
   const auto& project_dir_args = folder_args[config->project_dir];
   LOG_IF_S(INFO, !project_dir_args.empty())
@@ -317,12 +359,16 @@ std::vector<Project::Entry> LoadFromDirectoryListing(Config* init_opts,
 
   auto GetCompilerArgumentForFile = [&config,
                                      &folder_args](const std::string& path) {
-    for (std::string cur = GetDirName(path);
-         NormalizePath(cur) != config->project_dir; cur = GetDirName(cur)) {
+    for (std::string cur = GetDirName(path);; cur = GetDirName(cur)) {
       auto it = folder_args.find(cur);
-      if (it != folder_args.end()) {
+      if (it != folder_args.end())
         return it->second;
-      }
+      std::string normalized = NormalizePath(cur);
+      // Break if outside of the project root.
+      if (normalized.size() <= config->project_dir.size() ||
+          normalized.compare(0, config->project_dir.size(),
+                             config->project_dir) != 0)
+        break;
     }
     return folder_args[config->project_dir];
   };
@@ -332,6 +378,8 @@ std::vector<Project::Entry> LoadFromDirectoryListing(Config* init_opts,
     e.directory = config->project_dir;
     e.file = file;
     e.args = GetCompilerArgumentForFile(file);
+    if (e.args.empty())
+      e.args.push_back("%clang");  // Add a Dummy.
     e.args.push_back(e.file);
     result.push_back(
         GetCompilationEntryFromCompileCommandEntry(init_opts, config, e));
@@ -341,25 +389,58 @@ std::vector<Project::Entry> LoadFromDirectoryListing(Config* init_opts,
 }
 
 std::vector<Project::Entry> LoadCompilationEntriesFromDirectory(
-    Config* init_opts,
-    ProjectConfig* config,
+    Config* config,
+    ProjectConfig* project,
     const std::string& opt_compilation_db_dir) {
   // If there is a .cquery file always load using directory listing.
-  if (FileExists(config->project_dir + "/.cquery"))
-    return LoadFromDirectoryListing(init_opts, config);
+  if (FileExists(project->project_dir + ".cquery"))
+    return LoadFromDirectoryListing(config, project);
 
-  // Try to load compile_commands.json, but fallback to a project listing.
-  const auto& compilation_db_dir = opt_compilation_db_dir.empty()
-                                       ? config->project_dir
-                                       : opt_compilation_db_dir;
+  // If |compilationDatabaseCommand| is specified, execute it to get the compdb.
+  std::string comp_db_dir;
+  if (config->compilationDatabaseCommand.empty()) {
+    project->mode = ProjectMode::CompileCommandsJson;
+    // Try to load compile_commands.json, but fallback to a project listing.
+    comp_db_dir = opt_compilation_db_dir.empty() ? project->project_dir
+                                                 : opt_compilation_db_dir;
+  } else {
+    project->mode = ProjectMode::ExternalCommand;
+#ifdef _WIN32
+    // TODO
+#else
+    char tmpdir[] = "/tmp/cquery-compdb-XXXXXX";
+    if (!mkdtemp(tmpdir))
+      return {};
+    comp_db_dir = tmpdir;
+    rapidjson::StringBuffer input;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(input);
+    JsonWriter json_writer(&writer);
+    Reflect(json_writer, *config);
+    std::string contents = GetExternalCommandOutput(
+        std::vector<std::string>{config->compilationDatabaseCommand,
+                                 project->project_dir},
+        input.GetString());
+    std::ofstream(comp_db_dir + "/compile_commands.json") << contents;
+#endif
+  }
+
   LOG_S(INFO) << "Trying to load compile_commands.json";
   CXCompilationDatabase_Error cx_db_load_error;
   CXCompilationDatabase cx_db = clang_CompilationDatabase_fromDirectory(
-      compilation_db_dir.c_str(), &cx_db_load_error);
+      comp_db_dir.c_str(), &cx_db_load_error);
+  if (!config->compilationDatabaseCommand.empty()) {
+#ifdef _WIN32
+  // TODO
+#else
+    unlink((comp_db_dir + "/compile_commands.json").c_str());
+    rmdir(comp_db_dir.c_str());
+#endif
+  }
+
   if (cx_db_load_error == CXCompilationDatabase_CanNotLoadDatabase) {
     LOG_S(INFO) << "Unable to load compile_commands.json located at \""
-                << compilation_db_dir << "\"; using directory listing instead.";
-    return LoadFromDirectoryListing(init_opts, config);
+                << comp_db_dir << "\"; using directory listing instead.";
+    return LoadFromDirectoryListing(config, project);
   }
 
   Timer clang_time;
@@ -405,7 +486,7 @@ std::vector<Project::Entry> LoadCompilationEntriesFromDirectory(
     entry.file = NormalizePathWithTestOptOut(absolute_filename);
 
     result.push_back(
-        GetCompilationEntryFromCompileCommandEntry(init_opts, config, entry));
+        GetCompilationEntryFromCompileCommandEntry(config, project, entry));
     our_time.Pause();
   }
 
@@ -416,7 +497,6 @@ std::vector<Project::Entry> LoadCompilationEntriesFromDirectory(
 
   clang_time.ResetAndPrint("compile_commands.json clang time");
   our_time.ResetAndPrint("compile_commands.json our time");
-
   return result;
 }
 
@@ -428,28 +508,28 @@ int ComputeGuessScore(const std::string& a, const std::string& b) {
   const int kMatchPostfixWeight = 1;
 
   int score = 0;
-  int i = 0;
+  size_t i = 0;
 
   // Increase score based on matching prefix.
-  for (i = 0; i < a.length() && i < b.length(); ++i) {
+  for (i = 0; i < a.size() && i < b.size(); ++i) {
     if (a[i] != b[i])
       break;
     score += kMatchPrefixWeight;
   }
 
   // Reduce score based on mismatched directory distance.
-  for (int j = i; j < a.length(); ++j) {
+  for (size_t j = i; j < a.size(); ++j) {
     if (a[j] == '/')
       score -= kMismatchDirectoryWeight;
   }
-  for (int j = i; j < b.length(); ++j) {
+  for (size_t j = i; j < b.size(); ++j) {
     if (b[j] == '/')
       score -= kMismatchDirectoryWeight;
   }
 
   // Increase score based on common ending. Don't increase as much as matching
   // prefix or directory distance.
-  for (int offset = 1; offset <= a.length() && offset <= b.length(); ++offset) {
+  for (size_t offset = 1; offset <= a.size() && offset <= b.size(); ++offset) {
     if (a[a.size() - offset] != b[b.size() - offset])
       break;
     score += kMatchPostfixWeight;
@@ -460,24 +540,20 @@ int ComputeGuessScore(const std::string& a, const std::string& b) {
 
 }  // namespace
 
-void Project::Load(Config* init_opts,
-                   const std::vector<std::string>& extra_flags,
-                   const std::string& opt_compilation_db_dir,
-                   const std::string& root_directory,
-                   const std::string& resource_directory) {
+void Project::Load(Config* config, const std::string& root_directory) {
   // Load data.
-  ProjectConfig config;
-  config.extra_flags = extra_flags;
-  config.project_dir = root_directory;
-  config.resource_dir = resource_directory;
-  entries = LoadCompilationEntriesFromDirectory(init_opts, &config,
-                                                opt_compilation_db_dir);
+  ProjectConfig project;
+  project.extra_flags = config->extraClangArguments;
+  project.project_dir = root_directory;
+  project.resource_dir = config->resourceDirectory;
+  entries = LoadCompilationEntriesFromDirectory(
+      config, &project, config->compilationDatabaseDirectory);
 
   // Cleanup / postprocess include directories.
-  quote_include_directories.assign(config.quote_dirs.begin(),
-                                   config.quote_dirs.end());
-  angle_include_directories.assign(config.angle_dirs.begin(),
-                                   config.angle_dirs.end());
+  quote_include_directories.assign(project.quote_dirs.begin(),
+                                   project.quote_dirs.end());
+  angle_include_directories.assign(project.angle_dirs.begin(),
+                                   project.angle_dirs.end());
   for (std::string& path : quote_include_directories) {
     EnsureEndsInSlash(path);
     LOG_S(INFO) << "quote_include_dir: " << path;
@@ -491,6 +567,23 @@ void Project::Load(Config* init_opts,
   absolute_path_to_entry_index_.resize(entries.size());
   for (int i = 0; i < entries.size(); ++i)
     absolute_path_to_entry_index_[entries[i].filename] = i;
+}
+
+void Project::SetFlagsForFile(
+    const std::vector<std::string>& flags,
+    const std::string& path) {
+  auto it = absolute_path_to_entry_index_.find(path);
+  if (it != absolute_path_to_entry_index_.end()) {
+    // The entry already exists in the project, just set the flags.
+    this->entries[it->second].args = flags;
+  } else {
+    // Entry wasn't found, so we create a new one.
+    Entry entry;
+    entry.is_inferred = false;
+    entry.filename = path;
+    entry.args = flags;
+    this->entries.emplace_back(entry);
+  }
 }
 
 Project::Entry Project::FindCompilationEntryForFile(
@@ -515,8 +608,7 @@ Project::Entry Project::FindCompilationEntryForFile(
   result.is_inferred = true;
   result.filename = filename;
   if (!best_entry) {
-    // FIXME
-    result.args.push_back("clang++");
+    result.args.push_back("%clang");
     result.args.push_back(filename);
   } else {
     result.args = best_entry->args;
@@ -538,14 +630,14 @@ Project::Entry Project::FindCompilationEntryForFile(
 void Project::ForAllFilteredFiles(
     Config* config,
     std::function<void(int i, const Entry& entry)> action) {
-  GroupMatch matcher(config->indexWhitelist, config->indexBlacklist);
+  GroupMatch matcher(config->index.whitelist, config->index.blacklist);
   for (int i = 0; i < entries.size(); ++i) {
     const Project::Entry& entry = entries[i];
     std::string failure_reason;
     if (matcher.IsMatch(entry.filename, &failure_reason))
       action(i, entries[i]);
     else {
-      if (config->logSkippedPathsForIndex) {
+      if (config->index.logSkippedPaths) {
         LOG_S(INFO) << "[" << i + 1 << "/" << entries.size() << "]: Failed "
                     << failure_reason << "; skipping " << entry.filename;
       }
@@ -553,23 +645,42 @@ void Project::ForAllFilteredFiles(
   }
 }
 
+void Project::Index(Config* config,
+                    QueueManager* queue,
+                    WorkingFiles* wfiles,
+                    lsRequestId id) {
+  ForAllFilteredFiles(config, [&](int i, const Project::Entry& entry) {
+    optional<std::string> content = ReadContent(entry.filename);
+    if (!content) {
+      LOG_S(ERROR) << "When loading project, canont read file "
+                   << entry.filename;
+      return;
+    }
+    bool is_interactive = wfiles->GetFileByFilename(entry.filename) != nullptr;
+    queue->index_request.PushBack(
+        Index_Request(entry.filename, entry.args, is_interactive, *content,
+                      ICacheManager::Make(config), id));
+  });
+}
+
 TEST_SUITE("Project") {
   void CheckFlags(const std::string& directory, const std::string& file,
                   std::vector<std::string> raw,
                   std::vector<std::string> expected) {
     g_disable_normalize_path_for_test = true;
+    gTestOutputMode = true;
 
-    Config init_opts;
-    ProjectConfig config;
-    config.project_dir = "/w/c/s/";
-    config.resource_dir = "/w/resource_dir/";
+    Config config;
+    ProjectConfig project;
+    project.project_dir = "/w/c/s/";
+    project.resource_dir = "/w/resource_dir/";
 
     CompileCommandsEntry entry;
     entry.directory = directory;
     entry.args = raw;
     entry.file = file;
     Project::Entry result =
-        GetCompilationEntryFromCompileCommandEntry(&init_opts, &config, entry);
+        GetCompilationEntryFromCompileCommandEntry(&config, &project, entry);
 
     if (result.args != expected) {
       std::cout << "Raw:      " << StringJoin(raw) << std::endl;
@@ -596,67 +707,79 @@ TEST_SUITE("Project") {
     CheckFlags(
         /* raw */ {"clang", "-lstdc++", "myfile.cc"},
         /* expected */
-        {"clang", "-working-directory", "/dir/", "-xc++", "-std=c++14",
-         "-lstdc++", "&/dir/myfile.cc", "-resource-dir=/w/resource_dir/",
-         "-Wno-unknown-warning-option", "-fparse-all-comments"});
+        {"clang", "-working-directory=/dir/", "-lstdc++", "&/dir/myfile.cc",
+         "-resource-dir=/w/resource_dir/", "-Wno-unknown-warning-option",
+         "-fparse-all-comments"});
 
     CheckFlags(
         /* raw */ {"clang.exe"},
         /* expected */
-        {"clang.exe", "-working-directory", "/dir/", "-xc++", "-std=c++14",
+        {"clang.exe", "-working-directory=/dir/",
          "-resource-dir=/w/resource_dir/", "-Wno-unknown-warning-option",
          "-fparse-all-comments"});
 
     CheckFlags(
         /* raw */ {"goma", "clang"},
         /* expected */
-        {"clang", "-working-directory", "/dir/", "-xc++", "-std=c++14",
-         "-resource-dir=/w/resource_dir/", "-Wno-unknown-warning-option",
-         "-fparse-all-comments"});
+        {"clang", "-working-directory=/dir/", "-resource-dir=/w/resource_dir/",
+         "-Wno-unknown-warning-option", "-fparse-all-comments"});
 
     CheckFlags(
         /* raw */ {"goma", "clang", "--foo"},
         /* expected */
-        {"clang", "-working-directory", "/dir/", "-xc++", "-std=c++14", "--foo",
+        {"clang", "-working-directory=/dir/", "--foo",
          "-resource-dir=/w/resource_dir/", "-Wno-unknown-warning-option",
          "-fparse-all-comments"});
   }
 
   TEST_CASE("Windows path normalization") {
-    CheckFlags(
-        "E:/workdir", "E:/workdir/bar.cc", /* raw */ {"clang", "bar.cc"},
-        /* expected */
-        {"clang", "-working-directory", "E:/workdir", "-xc++", "-std=c++14",
-         "&E:/workdir/bar.cc", "-resource-dir=/w/resource_dir/",
-         "-Wno-unknown-warning-option", "-fparse-all-comments"});
+    CheckFlags("E:/workdir", "E:/workdir/bar.cc", /* raw */ {"clang", "bar.cc"},
+               /* expected */
+               {"clang", "-working-directory=E:/workdir", "&E:/workdir/bar.cc",
+                "-resource-dir=/w/resource_dir/", "-Wno-unknown-warning-option",
+                "-fparse-all-comments"});
 
-    CheckFlags(
-        "E:/workdir", "E:/workdir/bar.cc",
-        /* raw */ {"clang", "E:/workdir/bar.cc"},
-        /* expected */
-        {"clang", "-working-directory", "E:/workdir", "-xc++", "-std=c++14",
-         "&E:/workdir/bar.cc", "-resource-dir=/w/resource_dir/",
-         "-Wno-unknown-warning-option", "-fparse-all-comments"});
+    CheckFlags("E:/workdir", "E:/workdir/bar.cc",
+               /* raw */ {"clang", "E:/workdir/bar.cc"},
+               /* expected */
+               {"clang", "-working-directory=E:/workdir", "&E:/workdir/bar.cc",
+                "-resource-dir=/w/resource_dir/", "-Wno-unknown-warning-option",
+                "-fparse-all-comments"});
+
+    CheckFlags("E:/workdir", "E:/workdir/bar.cc",
+               /* raw */ {"clang-cl.exe", "/I./test", "E:/workdir/bar.cc"},
+               /* expected */
+               {"clang-cl.exe", "-working-directory=E:/workdir",
+                "/I&E:/workdir/./test", "&E:/workdir/bar.cc",
+                "-resource-dir=/w/resource_dir/", "-Wno-unknown-warning-option",
+                "-fparse-all-comments"});
+
+    CheckFlags("E:/workdir", "E:/workdir/bar.cc",
+               /* raw */
+               {"cl.exe", "/I../third_party/test/include", "E:/workdir/bar.cc"},
+               /* expected */
+               {"cl.exe", "-working-directory=E:/workdir",
+                "/I&E:/workdir/../third_party/test/include",
+                "&E:/workdir/bar.cc", "-resource-dir=/w/resource_dir/",
+                "-Wno-unknown-warning-option", "-fparse-all-comments"});
   }
 
   TEST_CASE("Path in args") {
-    CheckFlags(
-        "/home/user", "/home/user/foo/bar.c",
-        /* raw */ {"cc", "-O0", "foo/bar.c"},
-        /* expected */
-        {"cc", "-working-directory", "/home/user", "-xc", "-std=gnu11", "-O0",
-         "&/home/user/foo/bar.c", "-resource-dir=/w/resource_dir/",
-         "-Wno-unknown-warning-option", "-fparse-all-comments"});
+    CheckFlags("/home/user", "/home/user/foo/bar.c",
+               /* raw */ {"cc", "-O0", "foo/bar.c"},
+               /* expected */
+               {"cc", "-working-directory=/home/user", "-O0",
+                "&/home/user/foo/bar.c", "-resource-dir=/w/resource_dir/",
+                "-Wno-unknown-warning-option", "-fparse-all-comments"});
   }
 
   TEST_CASE("Implied binary") {
-    CheckFlags(
-        "/home/user", "/home/user/foo/bar.cc",
-        /* raw */ {"-DDONT_IGNORE_ME"},
-        /* expected */
-        {"clang++", "-working-directory", "/home/user", "-xc++", "-std=c++14",
-         "-DDONT_IGNORE_ME", "-resource-dir=/w/resource_dir/",
-         "-Wno-unknown-warning-option", "-fparse-all-comments"});
+    CheckFlags("/home/user", "/home/user/foo/bar.cc",
+               /* raw */ {"clang", "-DDONT_IGNORE_ME"},
+               /* expected */
+               {"clang", "-working-directory=/home/user", "-DDONT_IGNORE_ME",
+                "-resource-dir=/w/resource_dir/", "-Wno-unknown-warning-option",
+                "-fparse-all-comments"});
   }
 
   // Checks flag parsing for a random chromium file in comparison to what
@@ -844,9 +967,7 @@ TEST_SUITE("Project") {
 
         /* expected */
         {"../../third_party/llvm-build/Release+Asserts/bin/clang++",
-         "-working-directory",
-         "/w/c/s/out/Release",
-         "-xc++",
+         "-working-directory=/w/c/s/out/Release",
          "-DV8_DEPRECATION_WARNINGS",
          "-DDCHECK_ALWAYS_ON=1",
          "-DUSE_UDEV",
@@ -1180,9 +1301,7 @@ TEST_SUITE("Project") {
 
         /* expected */
         {"../../third_party/llvm-build/Release+Asserts/bin/clang++",
-         "-working-directory",
-         "/w/c/s/out/Release",
-         "-xc++",
+         "-working-directory=/w/c/s/out/Release",
          "-DV8_DEPRECATION_WARNINGS",
          "-DDCHECK_ALWAYS_ON=1",
          "-DUSE_UDEV",
@@ -1432,6 +1551,23 @@ TEST_SUITE("Project") {
       REQUIRE(entry.has_value());
       REQUIRE(entry->args == std::vector<std::string>{"a", "b", "ee.cc", "d"});
     }
+  }
+
+  TEST_CASE("IsWindowsAbsolutePath works correctly") {
+    REQUIRE(IsWindowsAbsolutePath("C:/Users/projects/"));
+    REQUIRE(IsWindowsAbsolutePath("C:/Users/projects"));
+    REQUIRE(IsWindowsAbsolutePath("C:/Users/projects"));
+    REQUIRE(IsWindowsAbsolutePath("C:\\Users\\projects"));
+    REQUIRE(IsWindowsAbsolutePath("C:\\\\Users\\\\projects"));
+    REQUIRE(IsWindowsAbsolutePath("c:\\\\Users\\\\projects"));
+    REQUIRE(IsWindowsAbsolutePath("A:\\\\Users\\\\projects"));
+
+    REQUIRE(!IsWindowsAbsolutePath("C:/"));
+    REQUIRE(!IsWindowsAbsolutePath("../abc/test"));
+    REQUIRE(!IsWindowsAbsolutePath("5:/test"));
+    REQUIRE(!IsWindowsAbsolutePath("cquery/project/file.cc"));
+    REQUIRE(!IsWindowsAbsolutePath(""));
+    REQUIRE(!IsWindowsAbsolutePath("/etc/linux/path"));
   }
 
   TEST_CASE("Entry inference prefers same file endings") {

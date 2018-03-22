@@ -13,7 +13,8 @@ OUTPUT:
       "detailed_name": "",
       "short_name": "",
       "kind": 0,
-      "parents": [],
+      "declarations": [],
+      "bases": [],
       "derived": [],
       "types": [],
       "funcs": [0],
@@ -29,16 +30,14 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [{
-          "spelling": "2:6-2:9",
-          "extent": "2:1-2:11",
-          "content": "void foo()",
+          "spell": "2:6-2:9|0|2|1",
           "param_spellings": []
         }],
       "declaring_type": 0,
-      "base": [],
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
+      "vars": [],
+      "uses": [],
       "callees": []
     }],
   "vars": []

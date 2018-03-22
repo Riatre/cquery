@@ -14,16 +14,17 @@ OUTPUT:
       "usr": 10528472276654770367,
       "detailed_name": "Foo",
       "short_name": "Foo",
-      "kind": 7,
-      "definition_spelling": "2:7-2:10",
-      "definition_extent": "2:1-2:13",
-      "parents": [],
+      "kind": 5,
+      "declarations": [],
+      "spell": "2:7-2:10|-1|1|2",
+      "extent": "2:1-2:13|-1|1|0",
+      "bases": [],
       "derived": [],
       "types": [],
       "funcs": [],
       "vars": [],
       "instances": [0, 1],
-      "uses": ["4:1-4:4", "5:1-5:4"]
+      "uses": ["4:1-4:4|-1|1|4", "5:1-5:4|-1|1|4"]
     }],
   "funcs": [],
   "vars": [{
@@ -32,11 +33,10 @@ OUTPUT:
       "detailed_name": "Foo<int> a",
       "short_name": "a",
       "declarations": [],
-      "definition_spelling": "4:10-4:11",
-      "definition_extent": "4:1-4:11",
-      "variable_type": 0,
+      "spell": "4:10-4:11|-1|1|2",
+      "extent": "4:1-4:11|-1|1|0",
+      "type": 0,
       "uses": [],
-      "parent_kind": 0,
       "kind": 13,
       "storage": 1
     }, {
@@ -45,11 +45,10 @@ OUTPUT:
       "detailed_name": "Foo<bool> b",
       "short_name": "b",
       "declarations": [],
-      "definition_spelling": "5:11-5:12",
-      "definition_extent": "5:1-5:12",
-      "variable_type": 0,
+      "spell": "5:11-5:12|-1|1|2",
+      "extent": "5:1-5:12|-1|1|0",
+      "type": 0,
       "uses": [],
-      "parent_kind": 0,
       "kind": 13,
       "storage": 1
     }]

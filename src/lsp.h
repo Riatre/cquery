@@ -1,19 +1,12 @@
 #pragma once
 
 #include "config.h"
-#include "ipc.h"
+#include "method.h"
 #include "serializer.h"
-#include "serializers/json.h"
 #include "utils.h"
 
-#include <optional.h>
-#include <rapidjson/writer.h>
-#include <variant.h>
-
-#include <algorithm>
-#include <iostream>
+#include <iosfwd>
 #include <unordered_map>
-#include <unordered_set>
 
 /////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////
@@ -31,7 +24,7 @@
 /////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////
 
-#define REGISTER_IPC_MESSAGE(type) \
+#define REGISTER_IN_MESSAGE(type) \
   static MessageRegistryRegister<type> type##message_handler_instance_;
 
 struct MessageRegistry {
@@ -39,22 +32,23 @@ struct MessageRegistry {
   static MessageRegistry* instance();
 
   using Allocator =
-      std::function<void(Reader& visitor, std::unique_ptr<BaseIpcMessage>*)>;
+      std::function<void(Reader& visitor, std::unique_ptr<InMessage>*)>;
   std::unordered_map<std::string, Allocator> allocators;
 
   optional<std::string> ReadMessageFromStdin(
-      std::unique_ptr<BaseIpcMessage>* message);
+      std::unique_ptr<InMessage>* message);
   optional<std::string> Parse(Reader& visitor,
-                              std::unique_ptr<BaseIpcMessage>* message);
+                              std::unique_ptr<InMessage>* message);
 };
 
 template <typename T>
 struct MessageRegistryRegister {
   MessageRegistryRegister() {
-    std::string method_name = IpcIdToString(T::kIpcId);
+    T dummy;
+    std::string method_name = dummy.GetMethodType();
     MessageRegistry::instance()->allocators[method_name] =
-        [](Reader& visitor, std::unique_ptr<BaseIpcMessage>* message) {
-          *message = MakeUnique<T>();
+        [](Reader& visitor, std::unique_ptr<InMessage>* message) {
+          *message = std::make_unique<T>();
           // Reflect may throw and *message will be partially deserialized.
           Reflect(visitor, static_cast<T&>(**message));
         };
@@ -63,7 +57,10 @@ struct MessageRegistryRegister {
 
 struct lsBaseOutMessage {
   virtual ~lsBaseOutMessage();
-  virtual void Write(std::ostream& out) = 0;
+  virtual void ReflectWriter(Writer&) = 0;
+
+  // Send the message to the language client by writing it to stdout.
+  void Write(std::ostream& out);
 };
 
 template <typename TDerived>
@@ -71,26 +68,12 @@ struct lsOutMessage : lsBaseOutMessage {
   // All derived types need to reflect on the |jsonrpc| member.
   std::string jsonrpc = "2.0";
 
-  // Send the message to the language client by writing it to stdout.
-  void Write(std::ostream& out) override {
-    rapidjson::StringBuffer output;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(output);
-    JsonWriter json_writer(&writer);
-    auto that = static_cast<TDerived*>(this);
-    Reflect(json_writer, *that);
-
-    out << "Content-Length: " << output.GetSize();
-    out << (char)13 << char(10) << char(13) << char(10);  // CRLFCRLF
-    out << output.GetString();
-    out.flush();
+  void ReflectWriter(Writer& writer) override {
+    Reflect(writer, static_cast<TDerived&>(*this));
   }
 };
 
 struct lsResponseError {
-  struct Data {
-    virtual void Write(Writer& writer) = 0;
-  };
-
   enum class lsErrorCodes : int {
     ParseError = -32700,
     InvalidRequest = -32600,
@@ -100,13 +83,13 @@ struct lsResponseError {
     serverErrorStart = -32099,
     serverErrorEnd = -32000,
     ServerNotInitialized = -32002,
-    UnknownErrorCode = -32001
+    UnknownErrorCode = -32001,
+    RequestCancelled = -32800,
   };
 
   lsErrorCodes code;
   // Short description.
   std::string message;
-  std::unique_ptr<Data> data;
 
   void Write(Writer& visitor);
 };
@@ -159,6 +142,7 @@ struct lsRange {
   lsRange(lsPosition start, lsPosition end);
 
   bool operator==(const lsRange& other) const;
+  bool operator<(const lsRange& other) const;
 
   lsPosition start;
   lsPosition end;
@@ -171,6 +155,7 @@ struct lsLocation {
   lsLocation(lsDocumentUri uri, lsRange range);
 
   bool operator==(const lsLocation& other) const;
+  bool operator<(const lsLocation& o) const;
 
   lsDocumentUri uri;
   lsRange range;
@@ -178,7 +163,9 @@ struct lsLocation {
 MAKE_HASHABLE(lsLocation, t.uri, t.range);
 MAKE_REFLECT_STRUCT(lsLocation, uri, range);
 
-enum class lsSymbolKind : int {
+enum class lsSymbolKind : uint8_t {
+  Unknown = 0,
+
   File = 1,
   Module = 2,
   Namespace = 3,
@@ -196,17 +183,37 @@ enum class lsSymbolKind : int {
   String = 15,
   Number = 16,
   Boolean = 17,
-  Array = 18
+  Array = 18,
+  Object = 19,
+  Key = 20,
+  Null = 21,
+  EnumMember = 22,
+  Struct = 23,
+  Event = 24,
+  Operator = 25,
+
+  // For C++, this is interpreted as "template parameter" (including
+  // non-type template parameters).
+  TypeParameter = 26,
+
+  // cquery extensions
+  // See also https://github.com/Microsoft/language-server-protocol/issues/344
+  // for new SymbolKind clang/Index/IndexSymbol.h clang::index::SymbolKind
+  TypeAlias = 252,
+  Parameter = 253,
+  StaticMethod = 254,
+  Macro = 255,
 };
 MAKE_REFLECT_TYPE_PROXY(lsSymbolKind);
 
-struct lsSymbolInformation {
-  std::string_view name;
-  lsSymbolKind kind;
-  lsLocation location;
-  std::string_view containerName;
+// cquery extension
+struct lsLocationEx : lsLocation {
+  optional<std::string_view> containerName;
+  optional<lsSymbolKind> parentKind;
+  // Avoid circular dependency on symbol.h
+  optional<uint16_t> role;
 };
-MAKE_REFLECT_STRUCT(lsSymbolInformation, name, kind, location, containerName);
+MAKE_REFLECT_STRUCT(lsLocationEx, uri, range, containerName, parentKind, role);
 
 template <typename T>
 struct lsCommand {
@@ -283,136 +290,6 @@ struct lsTextEdit {
 };
 MAKE_REFLECT_STRUCT(lsTextEdit, range, newText);
 
-// Defines whether the insert text in a completion item should be interpreted as
-// plain text or a snippet.
-enum class lsInsertTextFormat {
-  // The primary text to be inserted is treated as a plain string.
-  PlainText = 1,
-
-  // The primary text to be inserted is treated as a snippet.
-  //
-  // A snippet can define tab stops and placeholders with `$1`, `$2`
-  // and `${3:foo}`. `$0` defines the final tab stop, it defaults to
-  // the end of the snippet. Placeholders with equal identifiers are linked,
-  // that is typing in one will update others too.
-  //
-  // See also:
-  // https://github.com/Microsoft/vscode/blob/master/src/vs/editor/contrib/snippet/common/snippet.md
-  Snippet = 2
-};
-MAKE_REFLECT_TYPE_PROXY(lsInsertTextFormat);
-
-// The kind of a completion entry.
-enum class lsCompletionItemKind {
-  Text = 1,
-  Method = 2,
-  Function = 3,
-  Constructor = 4,
-  Field = 5,
-  Variable = 6,
-  Class = 7,
-  Interface = 8,
-  Module = 9,
-  Property = 10,
-  Unit = 11,
-  Value = 12,
-  Enum = 13,
-  Keyword = 14,
-  Snippet = 15,
-  Color = 16,
-  File = 17,
-  Reference = 18,
-  Folder = 19,
-  EnumMember = 20,
-  Constant = 21,
-  Struct = 22,
-  Event = 23,
-  Operator = 24,
-  TypeParameter = 25,
-};
-MAKE_REFLECT_TYPE_PROXY(lsCompletionItemKind);
-
-struct lsCompletionItem {
-  // A set of function parameters. Used internally for signature help. Not sent
-  // to vscode.
-  std::vector<std::string> parameters_;
-
-  // The label of this completion item. By default
-  // also the text that is inserted when selecting
-  // this completion.
-  std::string label;
-
-  // The kind of this completion item. Based of the kind
-  // an icon is chosen by the editor.
-  lsCompletionItemKind kind = lsCompletionItemKind::Text;
-
-  // A human-readable string with additional information
-  // about this item, like type or symbol information.
-  std::string detail;
-
-  // A human-readable string that represents a doc-comment.
-  optional<std::string> documentation;
-
-  // Internal information to order candidates.
-  bool found_;
-  std::string::size_type skip_;
-  unsigned priority_;
-
-  // Use <> or "" by default as include path.
-  bool use_angle_brackets_ = false;
-
-  // A string that shoud be used when comparing this item
-  // with other items. When `falsy` the label is used.
-  std::string sortText;
-
-  // A string that should be used when filtering a set of
-  // completion items. When `falsy` the label is used.
-  optional<std::string> filterText;
-
-  // A string that should be inserted a document when selecting
-  // this completion. When `falsy` the label is used.
-  std::string insertText;
-
-  // The format of the insert text. The format applies to both the `insertText`
-  // property and the `newText` property of a provided `textEdit`.
-  lsInsertTextFormat insertTextFormat = lsInsertTextFormat::PlainText;
-
-  // An edit which is applied to a document when selecting this completion. When
-  // an edit is provided the value of `insertText` is ignored.
-  //
-  // *Note:* The range of the edit must be a single line range and it must
-  // contain the position at which completion has been requested.
-  optional<lsTextEdit> textEdit;
-
-  // An optional array of additional text edits that are applied when
-  // selecting this completion. Edits must not overlap with the main edit
-  // nor with themselves.
-  // std::vector<TextEdit> additionalTextEdits;
-
-  // An optional command that is executed *after* inserting this completion.
-  // *Note* that additional modifications to the current document should be
-  // described with the additionalTextEdits-property. Command command;
-
-  // An data entry field that is preserved on a completion item between
-  // a completion and a completion resolve request.
-  // data ? : any
-
-  // Use this helper to figure out what content the completion item will insert
-  // into the document, as it could live in either |textEdit|, |insertText|, or
-  // |label|.
-  const std::string& InsertedContent() const;
-};
-MAKE_REFLECT_STRUCT(lsCompletionItem,
-                    label,
-                    kind,
-                    detail,
-                    documentation,
-                    sortText,
-                    insertText,
-                    filterText,
-                    insertTextFormat,
-                    textEdit);
-
 struct lsTextDocumentItem {
   // The text document's URI.
   lsDocumentUri uri;
@@ -450,17 +327,6 @@ struct lsWorkspaceEdit {
 };
 MAKE_REFLECT_STRUCT(lsWorkspaceEdit, documentChanges);
 
-// A document highlight kind.
-enum class lsDocumentHighlightKind {
-  // A textual occurrence.
-  Text = 1,
-  // Read-access of a symbol, like reading a variable.
-  Read = 2,
-  // Write-access of a symbol, like writing to a variable.
-  Write = 3
-};
-MAKE_REFLECT_TYPE_PROXY(lsDocumentHighlightKind);
-
 struct lsFormattingOptions {
   // Size of a tab in spaces.
   int tabSize;
@@ -468,122 +334,6 @@ struct lsFormattingOptions {
   bool insertSpaces;
 };
 MAKE_REFLECT_STRUCT(lsFormattingOptions, tabSize, insertSpaces);
-
-// A document highlight is a range inside a text document which deserves
-// special attention. Usually a document highlight is visualized by changing
-// the background color of its range.
-struct lsDocumentHighlight {
-  // The range this highlight applies to.
-  lsRange range;
-
-  // The highlight kind, default is DocumentHighlightKind.Text.
-  lsDocumentHighlightKind kind = lsDocumentHighlightKind::Text;
-};
-MAKE_REFLECT_STRUCT(lsDocumentHighlight, range, kind);
-
-enum class lsDiagnosticSeverity {
-  // Reports an error.
-  Error = 1,
-  // Reports a warning.
-  Warning = 2,
-  // Reports an information.
-  Information = 3,
-  // Reports a hint.
-  Hint = 4
-};
-MAKE_REFLECT_TYPE_PROXY(lsDiagnosticSeverity);
-
-struct lsDiagnostic {
-  // The range at which the message applies.
-  lsRange range;
-
-  // The diagnostic's severity. Can be omitted. If omitted it is up to the
-  // client to interpret diagnostics as error, warning, info or hint.
-  optional<lsDiagnosticSeverity> severity;
-
-  // The diagnostic's code. Can be omitted.
-  int code = 0;
-
-  // A human-readable string describing the source of this
-  // diagnostic, e.g. 'typescript' or 'super lint'.
-  std::string source = "cquery";
-
-  // The diagnostic's message.
-  std::string message;
-
-  // Non-serialized set of fixits.
-  std::vector<lsTextEdit> fixits_;
-};
-MAKE_REFLECT_STRUCT(lsDiagnostic, range, severity, source, message);
-
-enum class lsErrorCodes {
-  // Defined by JSON RPC
-  ParseError = -32700,
-  InvalidRequest = -32600,
-  MethodNotFound = -32601,
-  InvalidParams = -32602,
-  InternalError = -32603,
-  serverErrorStart = -32099,
-  serverErrorEnd = -32000,
-  ServerNotInitialized = -32002,
-  UnknownErrorCode = -32001,
-
-  // Defined by the protocol.
-  RequestCancelled = -32800,
-};
-MAKE_REFLECT_TYPE_PROXY(lsErrorCodes);
-struct Out_Error : public lsOutMessage<Out_Error> {
-  struct lsResponseError {
-    // A number indicating the error type that occurred.
-    lsErrorCodes code;
-
-    // A string providing a short description of the error.
-    std::string message;
-
-    // A Primitive or Structured value that contains additional
-    // information about the error. Can be omitted.
-    // optional<D> data;
-  };
-
-  lsRequestId id;
-
-  // The error object in case a request fails.
-  lsResponseError error;
-};
-MAKE_REFLECT_STRUCT(Out_Error::lsResponseError, code, message);
-MAKE_REFLECT_STRUCT(Out_Error, jsonrpc, id, error);
-
-// Cancel an existing request.
-struct Ipc_CancelRequest : public RequestMessage<Ipc_CancelRequest> {
-  static const IpcId kIpcId = IpcId::CancelRequest;
-};
-MAKE_REFLECT_STRUCT(Ipc_CancelRequest, id);
-
-// Diagnostics
-struct Out_TextDocumentPublishDiagnostics
-    : public lsOutMessage<Out_TextDocumentPublishDiagnostics> {
-  struct Params {
-    // The URI for which diagnostic information is reported.
-    lsDocumentUri uri;
-
-    // An array of diagnostic information items.
-    std::vector<lsDiagnostic> diagnostics;
-  };
-
-  Params params;
-};
-template <typename TVisitor>
-void Reflect(TVisitor& visitor, Out_TextDocumentPublishDiagnostics& value) {
-  std::string method = "textDocument/publishDiagnostics";
-  REFLECT_MEMBER_START();
-  REFLECT_MEMBER(jsonrpc);
-  REFLECT_MEMBER2("method", method);
-  REFLECT_MEMBER(params);
-  REFLECT_MEMBER_END();
-}
-MAKE_REFLECT_STRUCT(Out_TextDocumentPublishDiagnostics::Params,
-                    uri,
-                    diagnostics);
 
 // MarkedString can be used to render human readable text. It is either a
 // markdown string or a code-block that provides a language and a code snippet.
@@ -648,41 +398,8 @@ void Reflect(TVisitor& visitor, Out_ShowLogMessage& value) {
   REFLECT_MEMBER_END();
 }
 
-struct Out_Progress : public lsOutMessage<Out_Progress> {
-  struct Params {
-    int indexRequestCount = 0;
-    int doIdMapCount = 0;
-    int loadPreviousIndexCount = 0;
-    int onIdMappedCount = 0;
-    int onIndexedCount = 0;
-    int activeThreads = 0;
-  };
-  std::string method = "$cquery/progress";
-  Params params;
-};
-MAKE_REFLECT_STRUCT(Out_Progress::Params,
-                    indexRequestCount,
-                    doIdMapCount,
-                    loadPreviousIndexCount,
-                    onIdMappedCount,
-                    onIndexedCount,
-                    activeThreads);
-MAKE_REFLECT_STRUCT(Out_Progress, jsonrpc, method, params);
-
-struct Out_CquerySetInactiveRegion
-    : public lsOutMessage<Out_CquerySetInactiveRegion> {
-  struct Params {
-    lsDocumentUri uri;
-    std::vector<lsRange> inactiveRegions;
-  };
-  std::string method = "$cquery/setInactiveRegions";
-  Params params;
-};
-MAKE_REFLECT_STRUCT(Out_CquerySetInactiveRegion::Params, uri, inactiveRegions);
-MAKE_REFLECT_STRUCT(Out_CquerySetInactiveRegion, jsonrpc, method, params);
-
 struct Out_LocationList : public lsOutMessage<Out_LocationList> {
   lsRequestId id;
-  std::vector<lsLocation> result;
+  std::vector<lsLocationEx> result;
 };
 MAKE_REFLECT_STRUCT(Out_LocationList, jsonrpc, id, result);

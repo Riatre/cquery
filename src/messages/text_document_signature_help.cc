@@ -7,13 +7,14 @@
 #include <stdint.h>
 
 namespace {
-struct Ipc_TextDocumentSignatureHelp
-    : public RequestMessage<Ipc_TextDocumentSignatureHelp> {
-  const static IpcId kIpcId = IpcId::TextDocumentSignatureHelp;
+MethodType kMethodType = "textDocument/signatureHelp";
+
+struct In_TextDocumentSignatureHelp : public RequestInMessage {
+  MethodType GetMethodType() const override { return kMethodType; }
   lsTextDocumentPositionParams params;
 };
-MAKE_REFLECT_STRUCT(Ipc_TextDocumentSignatureHelp, id, params);
-REGISTER_IPC_MESSAGE(Ipc_TextDocumentSignatureHelp);
+MAKE_REFLECT_STRUCT(In_TextDocumentSignatureHelp, id, params);
+REGISTER_IN_MESSAGE(In_TextDocumentSignatureHelp);
 
 // Represents a parameter of a callable-signature. A parameter can
 // have a label and a doc-comment.
@@ -82,11 +83,11 @@ struct Out_TextDocumentSignatureHelp
 };
 MAKE_REFLECT_STRUCT(Out_TextDocumentSignatureHelp, jsonrpc, id, result);
 
-struct TextDocumentSignatureHelpHandler : MessageHandler {
-  IpcId GetId() const override { return IpcId::TextDocumentSignatureHelp; }
+struct Handler_TextDocumentSignatureHelp : MessageHandler {
+  MethodType GetMethodType() const override { return kMethodType; }
 
-  void Run(std::unique_ptr<BaseIpcMessage> message) override {
-    auto request = message->As<Ipc_TextDocumentSignatureHelp>();
+  void Run(std::unique_ptr<InMessage> message) override {
+    auto request = static_cast<In_TextDocumentSignatureHelp*>(message.get());
     lsTextDocumentPositionParams& params = request->params;
     WorkingFile* file =
         working_files->GetFileByFilename(params.textDocument.uri.GetPath());
@@ -102,10 +103,10 @@ struct TextDocumentSignatureHelpHandler : MessageHandler {
       return;
 
     ClangCompleteManager::OnComplete callback = std::bind(
-        [this](BaseIpcMessage* message, std::string search, int active_param,
+        [this](InMessage* message, std::string search, int active_param,
                const std::vector<lsCompletionItem>& results,
                bool is_cached_result) {
-          auto msg = message->As<Ipc_TextDocumentSignatureHelp>();
+          auto msg = static_cast<In_TextDocumentSignatureHelp*>(message);
 
           Out_TextDocumentSignatureHelp out;
           out.id = msg->id;
@@ -142,7 +143,7 @@ struct TextDocumentSignatureHelpHandler : MessageHandler {
           out.result.activeParameter = active_param;
 
           Timer timer;
-          QueueManager::WriteStdout(IpcId::TextDocumentSignatureHelp, out);
+          QueueManager::WriteStdout(kMethodType, out);
 
           if (!is_cached_result) {
             signature_cache->WithLock([&]() {
@@ -164,9 +165,9 @@ struct TextDocumentSignatureHelpHandler : MessageHandler {
         callback(signature_cache->cached_results_, true /*is_cached_result*/);
       });
     } else {
-      clang_complete->CodeComplete(params, std::move(callback));
+      clang_complete->CodeComplete(request->id, params, std::move(callback));
     }
   }
 };
-REGISTER_MESSAGE_HANDLER(TextDocumentSignatureHelpHandler);
+REGISTER_MESSAGE_HANDLER(Handler_TextDocumentSignatureHelp);
 }  // namespace

@@ -25,15 +25,13 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [{
-          "spelling": "1:6-1:12",
-          "extent": "1:1-1:14",
-          "content": "void called()",
+          "spell": "1:6-1:12|-1|1|1",
           "param_spellings": []
         }],
-      "base": [],
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": ["1@5:3-5:9"],
+      "vars": [],
+      "uses": ["5:3-5:9|1|3|32"],
       "callees": []
     }, {
       "id": 1,
@@ -43,13 +41,13 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [],
-      "definition_spelling": "4:6-4:12",
-      "definition_extent": "4:1-6:2",
-      "base": [],
+      "spell": "4:6-4:12|-1|1|2",
+      "extent": "4:1-6:2|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": ["2@9:3-9:9"],
-      "callees": ["0@5:3-5:9"]
+      "vars": [],
+      "uses": ["9:3-9:9|2|3|32"],
+      "callees": ["5:3-5:9|0|3|32"]
     }, {
       "id": 2,
       "usr": 4259594751088586730,
@@ -58,13 +56,13 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [],
-      "definition_spelling": "8:6-8:9",
-      "definition_extent": "8:1-10:2",
-      "base": [],
+      "spell": "8:6-8:9|-1|1|2",
+      "extent": "8:1-10:2|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
-      "callees": ["1@9:3-9:9"]
+      "vars": [],
+      "uses": [],
+      "callees": ["9:3-9:9|1|3|32"]
     }],
   "vars": []
 }

@@ -3,15 +3,18 @@
 #include "queue_manager.h"
 
 namespace {
-struct Ipc_CqueryDerived : public RequestMessage<Ipc_CqueryDerived> {
-  const static IpcId kIpcId = IpcId::CqueryDerived;
+MethodType kMethodType = "$cquery/derived";
+
+struct In_CqueryDerived : public RequestInMessage {
+  MethodType GetMethodType() const override { return kMethodType; }
   lsTextDocumentPositionParams params;
 };
-MAKE_REFLECT_STRUCT(Ipc_CqueryDerived, id, params);
-REGISTER_IPC_MESSAGE(Ipc_CqueryDerived);
+MAKE_REFLECT_STRUCT(In_CqueryDerived, id, params);
+REGISTER_IN_MESSAGE(In_CqueryDerived);
 
-struct CqueryDerivedHandler : BaseMessageHandler<Ipc_CqueryDerived> {
-  void Run(Ipc_CqueryDerived* request) override {
+struct Handler_CqueryDerived : BaseMessageHandler<In_CqueryDerived> {
+  MethodType GetMethodType() const override { return kMethodType; }
+  void Run(In_CqueryDerived* request) override {
     QueryFile* file;
     if (!FindFileOrFail(db, project, request->id,
                         request->params.textDocument.uri.GetPath(), &file)) {
@@ -23,31 +26,24 @@ struct CqueryDerivedHandler : BaseMessageHandler<Ipc_CqueryDerived> {
 
     Out_LocationList out;
     out.id = request->id;
-    std::vector<SymbolRef> syms =
-        FindSymbolsAtLocation(working_file, file, request->params.position);
-    // A template definition may be a use of its primary template.
-    // We want to get the definition instead of the use.
-    // Order by |Definition| DESC, range size ASC.
-    std::stable_sort(syms.begin(), syms.end(),
-                     [](const SymbolRef& a, const SymbolRef& b) {
-                       return (a.role & SymbolRole::Definition) >
-                              (b.role & SymbolRole::Definition);
-                     });
-    for (const SymbolRef& sym : syms) {
+    for (SymbolRef sym :
+         FindSymbolsAtLocation(working_file, file, request->params.position)) {
       if (sym.kind == SymbolKind::Type) {
         QueryType& type = db->GetType(sym);
-        out.result =
-            GetLsLocations(db, working_files, ToReference(db, type.derived));
+        out.result = GetLsLocationExs(
+            db, working_files, GetDeclarations(db, type.derived),
+            config->xref.container, config->xref.maxNum);
         break;
       } else if (sym.kind == SymbolKind::Func) {
         QueryFunc& func = db->GetFunc(sym);
-        out.result =
-            GetLsLocations(db, working_files, ToReference(db, func.derived));
+        out.result = GetLsLocationExs(
+            db, working_files, GetDeclarations(db, func.derived),
+            config->xref.container, config->xref.maxNum);
         break;
       }
     }
-    QueueManager::WriteStdout(IpcId::CqueryDerived, out);
+    QueueManager::WriteStdout(kMethodType, out);
   }
 };
-REGISTER_MESSAGE_HANDLER(CqueryDerivedHandler);
+REGISTER_MESSAGE_HANDLER(Handler_CqueryDerived);
 }  // namespace

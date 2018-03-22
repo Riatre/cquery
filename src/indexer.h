@@ -2,25 +2,24 @@
 
 #include "clang_cursor.h"
 #include "clang_index.h"
-#include "clang_symbol_kind.h"
 #include "clang_translation_unit.h"
 #include "clang_utils.h"
 #include "file_consumer.h"
 #include "file_contents.h"
-#include "language_server_api.h"
+#include "language.h"
+#include "lsp.h"
 #include "maybe.h"
+#include "nt_string.h"
 #include "performance.h"
 #include "position.h"
 #include "serializer.h"
+#include "symbol.h"
 #include "utils.h"
 
 #include <optional.h>
-#include <rapidjson/document.h>
-#include <rapidjson/prettywriter.h>
-#include <rapidjson/stringbuffer.h>
-#include <rapidjson/writer.h>
 #include <string_view.h>
 
+#include <ctype.h>
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -31,22 +30,7 @@ struct IndexFile;
 struct IndexType;
 struct IndexFunc;
 struct IndexVar;
-
-// The order matters. In FindSymbolsAtLocation, we want Var/Func ordered in
-// front of others.
-enum class SymbolKind : uint8_t { Invalid, File, Type, Func, Var };
-MAKE_REFLECT_TYPE_PROXY(SymbolKind);
-
-// FIXME: Make old compiler happy.
-namespace std {
-template <>
-struct hash<::SymbolKind> {
-  size_t operator()(const ::SymbolKind& instance) const {
-    using type = std::underlying_type<::SymbolKind>::type;
-    return std::hash<type>()(static_cast<type>(instance));
-  }
-};
-}  // namespace std
+struct QueryFile;
 
 using RawId = uint32_t;
 
@@ -57,13 +41,22 @@ struct Id {
   // Invalid id.
   Id() : id(-1) {}
   explicit Id(RawId id) : id(id) {}
-  template <typename U>
+  // Id<T> -> Id<void> or Id<T> -> Id<T> is allowed implicitly.
+  template <typename U,
+            typename std::enable_if<std::is_void<T>::value ||
+                                        std::is_same<T, U>::value,
+                                    bool>::type = false>
+  Id(Id<U> o) : id(o.id) {}
+  template <typename U,
+            typename std::enable_if<!(std::is_void<T>::value ||
+                                      std::is_same<T, U>::value),
+                                    bool>::type = false>
   explicit Id(Id<U> o) : id(o.id) {}
 
   // Needed for google::dense_hash_map.
   explicit operator RawId() const { return id; }
 
-  bool HasValue() const { return id != RawId(-1); }
+  bool HasValueForMaybe_() const { return id != RawId(-1); }
 
   bool operator==(const Id& o) const { return id == o.id; }
   bool operator!=(const Id& o) const { return id != o.id; }
@@ -87,36 +80,57 @@ using IndexTypeId = Id<IndexType>;
 using IndexFuncId = Id<IndexFunc>;
 using IndexVarId = Id<IndexVar>;
 
-struct IdCache;
+struct SymbolIdx {
+  Id<void> id;
+  SymbolKind kind;
+
+  bool operator==(const SymbolIdx& o) const {
+    return id == o.id && kind == o.kind;
+  }
+  bool operator!=(const SymbolIdx& o) const { return !(*this == o); }
+  bool operator<(const SymbolIdx& o) const {
+    if (id != o.id)
+      return id < o.id;
+    return kind < o.kind;
+  }
+};
+MAKE_REFLECT_STRUCT(SymbolIdx, kind, id);
+MAKE_HASHABLE(SymbolIdx, t.kind, t.id);
 
 struct Reference {
   Range range;
   Id<void> id;
   SymbolKind kind;
-  SymbolRole role;
+  Role role;
 
-  bool HasValue() const { return id.HasValue(); }
-  std::tuple<Range, Id<void>, SymbolKind, SymbolRole> ToTuple() const {
+  bool HasValueForMaybe_() const { return range.HasValueForMaybe_(); }
+  operator SymbolIdx() const { return {id, kind}; }
+  std::tuple<Range, Id<void>, SymbolKind, Role> ToTuple() const {
     return std::make_tuple(range, id, kind, role);
   }
-  bool operator==(const Reference& o) const {
-    return ToTuple() == o.ToTuple();
-  }
-  bool operator<(const Reference& o) const {
-    return ToTuple() < o.ToTuple();
-  }
+  bool operator==(const Reference& o) const { return ToTuple() == o.ToTuple(); }
+  bool operator<(const Reference& o) const { return ToTuple() < o.ToTuple(); }
 };
 
-// NOTE: id can be -1 if the function call is not coming from a function.
-struct IndexFuncRef : Reference {
-  // Constructors are unnecessary in C++17 p0017
-  IndexFuncRef() = default;
-  IndexFuncRef(Range range, Id<void> id, SymbolKind kind, SymbolRole role)
+// |id,kind| refer to the referenced entity.
+struct SymbolRef : Reference {
+  SymbolRef() = default;
+  SymbolRef(Range range, Id<void> id, SymbolKind kind, Role role)
       : Reference{range, id, kind, role} {}
 };
 
-void Reflect(Reader& visitor, IndexFuncRef& value);
-void Reflect(Writer& visitor, IndexFuncRef& value);
+// Represents an occurrence of a variable/type, |id,kind| refer to the lexical
+// parent.
+struct Use : Reference {
+  // |file| is used in Query* but not in Index*
+  Id<QueryFile> file;
+  Use() = default;
+  Use(Range range, Id<void> id, SymbolKind kind, Role role, Id<QueryFile> file)
+      : Reference{range, id, kind, role}, file(file) {}
+};
+// Used by |HANDLE_MERGEABLE| so only |range| is needed.
+MAKE_HASHABLE(Use, t.range);
+
 void Reflect(Reader& visitor, Reference& value);
 void Reflect(Writer& visitor, Reference& value);
 
@@ -126,15 +140,14 @@ struct IndexFamily {
   using TypeId = Id<IndexType>;
   using VarId = Id<IndexVar>;
   using Range = ::Range;
-  using FuncRef = IndexFuncRef;
 };
 
 template <typename F>
 struct TypeDefDefinitionData {
   // General metadata.
   std::string detailed_name;
-  std::string hover;
-  std::string comments;
+  NtString hover;
+  NtString comments;
 
   // While a class/type can technically have a separate declaration/definition,
   // it doesn't really happen in practice. The declaration never contains
@@ -145,11 +158,11 @@ struct TypeDefDefinitionData {
   // It's also difficult to identify a `class Foo;` statement with the clang
   // indexer API (it's doable using cursor AST traversal), so we don't bother
   // supporting the feature.
-  Maybe<typename F::Range> definition_spelling;
-  Maybe<typename F::Range> definition_extent;
+  Maybe<Use> spell;
+  Maybe<Use> extent;
 
   // Immediate parent types.
-  std::vector<typename F::TypeId> parents;
+  std::vector<typename F::TypeId> bases;
 
   // Types, functions, and variables defined in this type.
   std::vector<typename F::TypeId> types;
@@ -163,15 +176,13 @@ struct TypeDefDefinitionData {
 
   int16_t short_name_offset = 0;
   int16_t short_name_size = 0;
-  ClangSymbolKind kind = ClangSymbolKind::Unknown;
+  lsSymbolKind kind = lsSymbolKind::Unknown;
 
   bool operator==(const TypeDefDefinitionData& o) const {
-    return detailed_name == o.detailed_name &&
-           definition_spelling == o.definition_spelling &&
-           definition_extent == o.definition_extent && alias_of == o.alias_of &&
-           parents == o.parents && types == o.types && funcs == o.funcs &&
-           vars == o.vars && kind == o.kind && hover == o.hover &&
-           comments == o.comments;
+    return detailed_name == o.detailed_name && spell == o.spell &&
+           extent == o.extent && alias_of == o.alias_of && bases == o.bases &&
+           types == o.types && funcs == o.funcs && vars == o.vars &&
+           kind == o.kind && hover == o.hover && comments == o.comments;
   }
   bool operator!=(const TypeDefDefinitionData& o) const {
     return !(*this == o);
@@ -181,6 +192,8 @@ struct TypeDefDefinitionData {
     return std::string_view(detailed_name.c_str() + short_name_offset,
                             short_name_size);
   }
+  // Used by cquery_inheritance_hierarchy.cc:Expand generic lambda
+  std::string_view DetailedName(bool) const { return detailed_name; }
 };
 template <typename TVisitor, typename Family>
 void Reflect(TVisitor& visitor, TypeDefDefinitionData<Family>& value) {
@@ -191,11 +204,11 @@ void Reflect(TVisitor& visitor, TypeDefDefinitionData<Family>& value) {
   REFLECT_MEMBER(kind);
   REFLECT_MEMBER(hover);
   REFLECT_MEMBER(comments);
-  REFLECT_MEMBER(definition_spelling);
-  REFLECT_MEMBER(definition_extent);
+  REFLECT_MEMBER(spell);
+  REFLECT_MEMBER(extent);
   REFLECT_MEMBER(file);
   REFLECT_MEMBER(alias_of);
-  REFLECT_MEMBER(parents);
+  REFLECT_MEMBER(bases);
   REFLECT_MEMBER(types);
   REFLECT_MEMBER(funcs);
   REFLECT_MEMBER(vars);
@@ -209,6 +222,7 @@ struct IndexType {
   IndexTypeId id;
 
   Def def;
+  std::vector<Use> declarations;
 
   // Immediate derived types.
   std::vector<IndexTypeId> derived;
@@ -218,7 +232,7 @@ struct IndexType {
 
   // Every usage, useful for things like renames.
   // NOTE: Do not insert directly! Use AddUsage instead.
-  std::vector<Reference> uses;
+  std::vector<Use> uses;
 
   IndexType() {}  // For serialization.
   IndexType(IndexTypeId id, Usr usr);
@@ -231,35 +245,34 @@ template <typename F>
 struct FuncDefDefinitionData {
   // General metadata.
   std::string detailed_name;
-  std::string hover;
-  std::string comments;
-  Maybe<typename F::Range> definition_spelling;
-  Maybe<typename F::Range> definition_extent;
+  NtString hover;
+  NtString comments;
+  Maybe<Use> spell;
+  Maybe<Use> extent;
 
   // Method this method overrides.
-  std::vector<typename F::FuncId> base;
+  std::vector<typename F::FuncId> bases;
 
-  // Local variables defined in this function.
-  std::vector<typename F::VarId> locals;
+  // Local variables or parameters.
+  std::vector<typename F::VarId> vars;
 
   // Functions that this function calls.
-  std::vector<typename F::FuncRef> callees;
+  std::vector<SymbolRef> callees;
 
   typename F::FileId file;
   // Type which declares this one (ie, it is a method)
   Maybe<typename F::TypeId> declaring_type;
   int16_t short_name_offset = 0;
   int16_t short_name_size = 0;
-  ClangSymbolKind kind = ClangSymbolKind::Unknown;
+  lsSymbolKind kind = lsSymbolKind::Unknown;
   StorageClass storage = StorageClass::Invalid;
 
   bool operator==(const FuncDefDefinitionData& o) const {
-    return detailed_name == o.detailed_name &&
-           definition_spelling == o.definition_spelling &&
-           definition_extent == o.definition_extent &&
-           declaring_type == o.declaring_type && base == o.base &&
-           locals == o.locals && callees == o.callees && kind == o.kind &&
-           storage == o.storage && hover == o.hover && comments == o.comments;
+    return detailed_name == o.detailed_name && spell == o.spell &&
+           extent == o.extent && declaring_type == o.declaring_type &&
+           bases == o.bases && vars == o.vars && callees == o.callees &&
+           kind == o.kind && storage == o.storage && hover == o.hover &&
+           comments == o.comments;
   }
   bool operator!=(const FuncDefDefinitionData& o) const {
     return !(*this == o);
@@ -268,6 +281,12 @@ struct FuncDefDefinitionData {
   std::string_view ShortName() const {
     return std::string_view(detailed_name.c_str() + short_name_offset,
                             short_name_size);
+  }
+  std::string_view DetailedName(bool params) const {
+    if (params)
+      return detailed_name;
+    return std::string_view(detailed_name)
+        .substr(0, short_name_offset + short_name_size);
   }
 };
 
@@ -281,12 +300,12 @@ void Reflect(TVisitor& visitor, FuncDefDefinitionData<Family>& value) {
   REFLECT_MEMBER(storage);
   REFLECT_MEMBER(hover);
   REFLECT_MEMBER(comments);
-  REFLECT_MEMBER(definition_spelling);
-  REFLECT_MEMBER(definition_extent);
+  REFLECT_MEMBER(spell);
+  REFLECT_MEMBER(extent);
   REFLECT_MEMBER(file);
   REFLECT_MEMBER(declaring_type);
-  REFLECT_MEMBER(base);
-  REFLECT_MEMBER(locals);
+  REFLECT_MEMBER(bases);
+  REFLECT_MEMBER(vars);
   REFLECT_MEMBER(callees);
   REFLECT_MEMBER_END();
 }
@@ -301,11 +320,7 @@ struct IndexFunc {
 
   struct Declaration {
     // Range of only the function name.
-    Range spelling;
-    // Full range of the declaration.
-    Range extent;
-    // Full text of the declaration.
-    std::string content;
+    Use spell;
     // Location of the parameter names.
     std::vector<Range> param_spellings;
   };
@@ -320,70 +335,69 @@ struct IndexFunc {
   // function context then the FuncRef will not have an associated id.
   //
   // To get all usages, also include the ranges inside of declarations and
-  // def.definition_spelling.
-  std::vector<IndexFuncRef> callers;
+  // def.spell.
+  std::vector<Use> uses;
 
   IndexFunc() {}  // For serialization.
-  IndexFunc(IndexFuncId id, Usr usr) : usr(usr), id(id) {
-    // assert(usr.size() > 0);
-  }
+  IndexFunc(IndexFuncId id, Usr usr) : usr(usr), id(id) {}
 
   bool operator<(const IndexFunc& other) const { return id < other.id; }
 };
 MAKE_HASHABLE(IndexFunc, t.id);
-MAKE_REFLECT_STRUCT(IndexFunc::Declaration,
-                    spelling,
-                    extent,
-                    content,
-                    param_spellings);
+MAKE_REFLECT_STRUCT(IndexFunc::Declaration, spell, param_spellings);
 
 template <typename F>
 struct VarDefDefinitionData {
   // General metadata.
   std::string detailed_name;
-  std::string hover;
-  std::string comments;
+  NtString hover;
+  NtString comments;
   // TODO: definitions should be a list of ranges, since there can be more
   //       than one - when??
-  Maybe<typename F::Range> definition_spelling;
-  Maybe<typename F::Range> definition_extent;
+  Maybe<Use> spell;
+  Maybe<Use> extent;
 
   typename F::FileId file;
   // Type of the variable.
-  Maybe<typename F::TypeId> variable_type;
+  Maybe<typename F::TypeId> type;
 
   // Function/type which declares this one.
-  Maybe<Id<void>> parent_id;
   int16_t short_name_offset = 0;
   int16_t short_name_size = 0;
-  SymbolKind parent_kind = SymbolKind::Invalid;
 
-  ClangSymbolKind kind = ClangSymbolKind::Unknown;
+  lsSymbolKind kind = lsSymbolKind::Unknown;
   // Note a variable may have instances of both |None| and |Extern|
   // (declaration).
   StorageClass storage = StorageClass::Invalid;
 
-  bool is_local() const {
-    return kind == ClangSymbolKind::Parameter ||
-           kind == ClangSymbolKind::Variable;
-  }
-  bool is_macro() const { return kind == ClangSymbolKind::Macro; }
+  bool is_local() const { return kind == lsSymbolKind::Variable; }
 
   bool operator==(const VarDefDefinitionData& o) const {
-    return detailed_name == o.detailed_name &&
-           definition_spelling == o.definition_spelling &&
-           definition_extent == o.definition_extent &&
-           variable_type == o.variable_type && parent_id == o.parent_id &&
-           parent_kind == o.parent_kind && kind == o.kind &&
+    return detailed_name == o.detailed_name && spell == o.spell &&
+           extent == o.extent && type == o.type && kind == o.kind &&
            storage == o.storage && hover == o.hover && comments == o.comments;
   }
-  bool operator!=(const VarDefDefinitionData& other) const {
-    return !(*this == other);
-  }
+  bool operator!=(const VarDefDefinitionData& o) const { return !(*this == o); }
 
   std::string_view ShortName() const {
     return std::string_view(detailed_name.c_str() + short_name_offset,
                             short_name_size);
+  }
+  std::string DetailedName(bool qualified) const {
+    if (qualified)
+      return detailed_name;
+    int i = short_name_offset;
+    for (int paren = 0; i; i--) {
+      // Skip parentheses in "(anon struct)::name"
+      if (detailed_name[i - 1] == ')')
+        paren++;
+      else if (detailed_name[i - 1] == '(')
+        paren--;
+      else if (!(paren > 0 || isalnum(detailed_name[i - 1]) ||
+                 detailed_name[i - 1] == '_' || detailed_name[i - 1] == ':'))
+        break;
+    }
+    return detailed_name.substr(0, i) + detailed_name.substr(short_name_offset);
   }
 };
 
@@ -395,12 +409,10 @@ void Reflect(TVisitor& visitor, VarDefDefinitionData<Family>& value) {
   REFLECT_MEMBER(short_name_offset);
   REFLECT_MEMBER(hover);
   REFLECT_MEMBER(comments);
-  REFLECT_MEMBER(definition_spelling);
-  REFLECT_MEMBER(definition_extent);
+  REFLECT_MEMBER(spell);
+  REFLECT_MEMBER(extent);
   REFLECT_MEMBER(file);
-  REFLECT_MEMBER(variable_type);
-  REFLECT_MEMBER(parent_id);
-  REFLECT_MEMBER(parent_kind);
+  REFLECT_MEMBER(type);
   REFLECT_MEMBER(kind);
   REFLECT_MEMBER(storage);
   REFLECT_MEMBER_END();
@@ -414,14 +426,11 @@ struct IndexVar {
 
   Def def;
 
-  std::vector<Range> declarations;
-  // Usages.
-  std::vector<Reference> uses;
+  std::vector<Use> declarations;
+  std::vector<Use> uses;
 
   IndexVar() {}  // For serialization.
-  IndexVar(IndexVarId id, Usr usr) : usr(usr), id(id) {
-    // assert(usr.size() > 0);
-  }
+  IndexVar(IndexVarId id, Usr usr) : usr(usr), id(id) {}
 
   bool operator<(const IndexVar& other) const { return id < other.id; }
 };
@@ -446,12 +455,6 @@ struct IndexInclude {
   // Absolute path to the index.
   std::string resolved_path;
 };
-
-// Used to identify the language at a file level. The ordering is important, as
-// a file previously identified as `C`, will be changed to `Cpp` if it
-// encounters a c++ declaration.
-enum class LanguageId { Unknown = 0, C = 1, Cpp = 2, ObjC = 3 };
-MAKE_REFLECT_TYPE_PROXY(LanguageId);
 
 struct IndexFile {
   IdCache id_cache;

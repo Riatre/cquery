@@ -4,6 +4,7 @@
 #include "platform.h"
 #include "project.h"
 #include "queue_manager.h"
+#include "timer.h"
 #include "timestamp_manager.h"
 #include "working_files.h"
 
@@ -12,9 +13,10 @@
 #include <unordered_set>
 
 namespace {
-struct Ipc_CqueryFreshenIndex
-    : public NotificationMessage<Ipc_CqueryFreshenIndex> {
-  const static IpcId kIpcId = IpcId::CqueryFreshenIndex;
+MethodType kMethodType = "$cquery/freshenIndex";
+
+struct In_CqueryFreshenIndex : public NotificationInMessage {
+  MethodType GetMethodType() const override { return kMethodType; }
   struct Params {
     bool dependencies = true;
     std::vector<std::string> whitelist;
@@ -22,15 +24,16 @@ struct Ipc_CqueryFreshenIndex
   };
   Params params;
 };
-MAKE_REFLECT_STRUCT(Ipc_CqueryFreshenIndex::Params,
+MAKE_REFLECT_STRUCT(In_CqueryFreshenIndex::Params,
                     dependencies,
                     whitelist,
                     blacklist);
-MAKE_REFLECT_STRUCT(Ipc_CqueryFreshenIndex, params);
-REGISTER_IPC_MESSAGE(Ipc_CqueryFreshenIndex);
+MAKE_REFLECT_STRUCT(In_CqueryFreshenIndex, params);
+REGISTER_IN_MESSAGE(In_CqueryFreshenIndex);
 
-struct CqueryFreshenIndexHandler : BaseMessageHandler<Ipc_CqueryFreshenIndex> {
-  void Run(Ipc_CqueryFreshenIndex* request) override {
+struct Handler_CqueryFreshenIndex : BaseMessageHandler<In_CqueryFreshenIndex> {
+  MethodType GetMethodType() const override { return kMethodType; }
+  void Run(In_CqueryFreshenIndex* request) override {
     LOG_S(INFO) << "Freshening " << project->entries.size() << " files";
 
     // TODO: think about this flow and test it more.
@@ -82,26 +85,12 @@ struct CqueryFreshenIndexHandler : BaseMessageHandler<Ipc_CqueryFreshenIndex> {
         }
     }
 
-    auto* queue = QueueManager::instance();
-
+    Timer time;
     // Send index requests for every file.
-    project->ForAllFilteredFiles(
-        config, [&](int i, const Project::Entry& entry) {
-          if (!need_index.count(entry.filename))
-            return;
-          optional<std::string> content = ReadContent(entry.filename);
-          if (!content) {
-            LOG_S(ERROR) << "When freshening index, cannot read file "
-                         << entry.filename;
-            return;
-          }
-          bool is_interactive =
-              working_files->GetFileByFilename(entry.filename) != nullptr;
-          queue->index_request.PushBack(
-              Index_Request(entry.filename, entry.args, is_interactive,
-                            *content, ICacheManager::Make(config)));
-        });
+    project->Index(config, QueueManager::instance(), working_files,
+                   std::monostate());
+    time.ResetAndPrint("[perf] Dispatched $cquery/freshenIndex index requests");
   }
 };
-REGISTER_MESSAGE_HANDLER(CqueryFreshenIndexHandler);
+REGISTER_MESSAGE_HANDLER(Handler_CqueryFreshenIndex);
 }  // namespace

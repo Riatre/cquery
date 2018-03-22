@@ -13,12 +13,12 @@ OUTPUT:
       "kind": 12,
       "storage": 1,
       "declarations": [],
-      "definition_spelling": "1:6-1:9",
-      "definition_extent": "1:1-1:22",
-      "base": [],
+      "spell": "1:6-1:9|-1|1|2",
+      "extent": "1:1-1:22|-1|1|0",
+      "bases": [],
       "derived": [],
-      "locals": [],
-      "callers": [],
+      "vars": [],
+      "uses": [],
       "callees": []
     }],
   "vars": []

@@ -3,15 +3,20 @@
 #include "queue_manager.h"
 
 namespace {
-struct Ipc_CqueryVars : public RequestMessage<Ipc_CqueryVars> {
-  const static IpcId kIpcId = IpcId::CqueryVars;
+MethodType kMethodType = "$cquery/vars";
+
+struct In_CqueryVars : public RequestInMessage {
+  MethodType GetMethodType() const override { return kMethodType; }
+
   lsTextDocumentPositionParams params;
 };
-MAKE_REFLECT_STRUCT(Ipc_CqueryVars, id, params);
-REGISTER_IPC_MESSAGE(Ipc_CqueryVars);
+MAKE_REFLECT_STRUCT(In_CqueryVars, id, params);
+REGISTER_IN_MESSAGE(In_CqueryVars);
 
-struct CqueryVarsHandler : BaseMessageHandler<Ipc_CqueryVars> {
-  void Run(Ipc_CqueryVars* request) override {
+struct Handler_CqueryVars : BaseMessageHandler<In_CqueryVars> {
+  MethodType GetMethodType() const override { return kMethodType; }
+
+  void Run(In_CqueryVars* request) override {
     QueryFile* file;
     if (!FindFileOrFail(db, project, request->id,
                         request->params.textDocument.uri.GetPath(), &file)) {
@@ -25,27 +30,28 @@ struct CqueryVarsHandler : BaseMessageHandler<Ipc_CqueryVars> {
     out.id = request->id;
     for (SymbolRef sym :
          FindSymbolsAtLocation(working_file, file, request->params.position)) {
-      RawId idx = sym.Idx();
+      Id<void> id = sym.id;
       switch (sym.kind) {
         default:
           break;
         case SymbolKind::Var: {
-          QueryVar& var = db->GetVar(sym);
-          if (!var.def || !var.def->variable_type)
+          const QueryVar::Def* def = db->GetVar(sym).AnyDef();
+          if (!def || !def->type)
             continue;
-          idx = var.def->variable_type->id;
+          id = *def->type;
         }
         // fallthrough
         case SymbolKind::Type: {
-          QueryType& type = db->types[idx];
-          out.result = GetLsLocations(db, working_files,
-                                      ToReference(db, type.instances));
+          QueryType& type = db->types[id.id];
+          out.result = GetLsLocationExs(
+              db, working_files, GetDeclarations(db, type.instances),
+              config->xref.container, config->xref.maxNum);
           break;
         }
       }
     }
-    QueueManager::WriteStdout(IpcId::CqueryVars, out);
+    QueueManager::WriteStdout(kMethodType, out);
   }
 };
-REGISTER_MESSAGE_HANDLER(CqueryVarsHandler);
+REGISTER_MESSAGE_HANDLER(Handler_CqueryVars);
 }  // namespace

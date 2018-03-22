@@ -5,12 +5,15 @@
 #include <loguru.hpp>
 
 namespace {
-struct Ipc_TextDocumentReferences
-    : public RequestMessage<Ipc_TextDocumentReferences> {
-  const static IpcId kIpcId = IpcId::TextDocumentReferences;
+MethodType kMethodType = "textDocument/references";
+
+struct In_TextDocumentReferences : public RequestInMessage {
+  MethodType GetMethodType() const override { return kMethodType; }
   struct lsReferenceContext {
     // Include the declaration of the current symbol.
     bool includeDeclaration;
+    // Include references with these |Role| bits set.
+    Role role = Role::All;
   };
   struct Params {
     lsTextDocumentIdentifier textDocument;
@@ -20,25 +23,28 @@ struct Ipc_TextDocumentReferences
 
   Params params;
 };
-MAKE_REFLECT_STRUCT(Ipc_TextDocumentReferences::lsReferenceContext,
-                    includeDeclaration);
-MAKE_REFLECT_STRUCT(Ipc_TextDocumentReferences::Params,
+MAKE_REFLECT_STRUCT(In_TextDocumentReferences::lsReferenceContext,
+                    includeDeclaration,
+                    role);
+MAKE_REFLECT_STRUCT(In_TextDocumentReferences::Params,
                     textDocument,
                     position,
                     context);
-MAKE_REFLECT_STRUCT(Ipc_TextDocumentReferences, id, params);
-REGISTER_IPC_MESSAGE(Ipc_TextDocumentReferences);
+MAKE_REFLECT_STRUCT(In_TextDocumentReferences, id, params);
+REGISTER_IN_MESSAGE(In_TextDocumentReferences);
 
 struct Out_TextDocumentReferences
     : public lsOutMessage<Out_TextDocumentReferences> {
   lsRequestId id;
-  std::vector<lsLocation> result;
+  std::vector<lsLocationEx> result;
 };
 MAKE_REFLECT_STRUCT(Out_TextDocumentReferences, jsonrpc, id, result);
 
-struct TextDocumentReferencesHandler
-    : BaseMessageHandler<Ipc_TextDocumentReferences> {
-  void Run(Ipc_TextDocumentReferences* request) override {
+struct Handler_TextDocumentReferences
+    : BaseMessageHandler<In_TextDocumentReferences> {
+  MethodType GetMethodType() const override { return kMethodType; }
+
+  void Run(In_TextDocumentReferences* request) override {
     QueryFile* file;
     if (!FindFileOrFail(db, project, request->id,
                         request->params.textDocument.uri.GetPath(), &file)) {
@@ -50,19 +56,22 @@ struct TextDocumentReferencesHandler
 
     Out_TextDocumentReferences out;
     out.id = request->id;
+    bool container = config->xref.container;
 
     for (const SymbolRef& sym :
          FindSymbolsAtLocation(working_file, file, request->params.position)) {
       // Found symbol. Return references.
-      std::vector<Reference> uses = GetUsesOfSymbol(
-          db, sym, request->params.context.includeDeclaration);
-      out.result.reserve(uses.size());
-      for (const Reference& use : uses) {
-        optional<lsLocation> ls_location =
-            GetLsLocation(db, working_files, use);
-        if (ls_location)
-          out.result.push_back(*ls_location);
-      }
+      EachOccurrenceWithParent(
+          db, sym, request->params.context.includeDeclaration,
+          [&](Use use, lsSymbolKind parent_kind) {
+            if (use.role & request->params.context.role)
+              if (optional<lsLocationEx> ls_loc =
+                      GetLsLocationEx(db, working_files, use, container)) {
+                if (container)
+                  ls_loc->parentKind = parent_kind;
+                out.result.push_back(*ls_loc);
+              }
+          });
       break;
     }
 
@@ -75,7 +84,7 @@ struct TextDocumentReferencesHandler
               for (const IndexInclude& include1 : file1.def->includes)
                 if (include1.resolved_path == include.resolved_path) {
                   // Another file |file1| has the same include line.
-                  lsLocation result;
+                  lsLocationEx result;
                   result.uri = lsDocumentUri::FromPath(file1.def->path);
                   result.range.start.line = result.range.end.line =
                       include1.line;
@@ -85,8 +94,10 @@ struct TextDocumentReferencesHandler
           break;
         }
 
-    QueueManager::WriteStdout(IpcId::TextDocumentReferences, out);
+    if ((int)out.result.size() >= config->xref.maxNum)
+      out.result.resize(config->xref.maxNum);
+    QueueManager::WriteStdout(kMethodType, out);
   }
 };
-REGISTER_MESSAGE_HANDLER(TextDocumentReferencesHandler);
+REGISTER_MESSAGE_HANDLER(Handler_TextDocumentReferences);
 }  // namespace

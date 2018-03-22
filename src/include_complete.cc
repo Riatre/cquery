@@ -17,13 +17,13 @@ struct CompletionCandidate {
 };
 
 std::string ElideLongPath(Config* config, const std::string& path) {
-  if (config->includeCompletionMaximumPathLength <= 0)
+  if (config->completion.includeMaxPathSize <= 0)
     return path;
 
-  if (path.size() <= config->includeCompletionMaximumPathLength)
+  if ((int)path.size() <= config->completion.includeMaxPathSize)
     return path;
 
-  size_t start = path.size() - config->includeCompletionMaximumPathLength;
+  size_t start = path.size() - config->completion.includeMaxPathSize;
   return ".." + path.substr(start + 2);
 }
 
@@ -82,7 +82,7 @@ lsCompletionItem BuildCompletionItem(Config* config,
                                      bool is_stl) {
   lsCompletionItem item;
   item.label = ElideLongPath(config, path);
-  item.detail = path; // the include path, used in de-duplicating
+  item.detail = path;  // the include path, used in de-duplicating
   item.textEdit = lsTextEdit();
   item.textEdit->newText = path;
   item.insertTextFormat = lsInsertTextFormat::PlainText;
@@ -110,10 +110,10 @@ void IncludeComplete::Rescan() {
   absolute_path_to_completion_item.clear();
   inserted_paths.clear();
 
-  if (!match_ && (!config_->includeCompletionWhitelist.empty() ||
-                  !config_->includeCompletionBlacklist.empty()))
-    match_ = MakeUnique<GroupMatch>(config_->includeCompletionWhitelist,
-                                    config_->includeCompletionBlacklist);
+  if (!match_ && (!config_->completion.includeWhitelist.empty() ||
+                  !config_->completion.includeBlacklist.empty()))
+    match_ = std::make_unique<GroupMatch>(config_->completion.includeWhitelist,
+                                          config_->completion.includeBlacklist);
 
   is_scanning = true;
   WorkThread::StartThread("scan_includes", [this]() {
@@ -139,10 +139,13 @@ void IncludeComplete::InsertCompletionItem(const std::string& absolute_path,
     // insert if not found or with shorter include path
     auto it = absolute_path_to_completion_item.find(absolute_path);
     if (it == absolute_path_to_completion_item.end() ||
-        completion_items[it->second].detail.length() > item.detail.length())
-      absolute_path_to_completion_item[absolute_path] = completion_items.size();
+        completion_items[it->second].detail.length() > item.detail.length()) {
+      absolute_path_to_completion_item[absolute_path] =
+          completion_items.size() - 1;
+    }
   } else {
-    lsCompletionItem& inserted_item = completion_items[inserted_paths[item.detail]];
+    lsCompletionItem& inserted_item =
+        completion_items[inserted_paths[item.detail]];
     // Update |use_angle_brackets_|, prefer quotes.
     if (!item.use_angle_brackets_)
       inserted_item.use_angle_brackets_ = false;
@@ -150,8 +153,7 @@ void IncludeComplete::InsertCompletionItem(const std::string& absolute_path,
 }
 
 void IncludeComplete::AddFile(const std::string& absolute_path) {
-  if (!EndsWithAny(absolute_path,
-                   config_->includeCompletionWhitelistLiteralEnding))
+  if (!EndsWithAny(absolute_path, config_->completion.includeSuffixWhitelist))
     return;
   if (match_ && !match_->IsMatch(absolute_path))
     return;
@@ -183,8 +185,7 @@ void IncludeComplete::InsertIncludesFromDirectory(std::string directory,
   GetFilesInFolder(
       directory, true /*recursive*/, false /*add_folder_to_path*/,
       [&](const std::string& path) {
-        if (!EndsWithAny(path,
-                         config_->includeCompletionWhitelistLiteralEnding))
+        if (!EndsWithAny(path, config_->completion.includeSuffixWhitelist))
           return;
         if (match_ && !match_->IsMatch(directory + path))
           return;

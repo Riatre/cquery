@@ -1,9 +1,10 @@
-#include "language_server_api.h"
+#include "lsp.h"
 
 #include "recorder.h"
 #include "serializers/json.h"
 
 #include <doctest/doctest.h>
+#include <rapidjson/writer.h>
 #include <loguru.hpp>
 
 #include <stdio.h>
@@ -57,7 +58,7 @@ optional<std::string> ReadJsonRpcContentFrom(
   // Read content.
   std::string content;
   content.reserve(content_length);
-  for (size_t i = 0; i < content_length; ++i) {
+  for (int i = 0; i < content_length; ++i) {
     optional<char> c = read();
     if (!c) {
       LOG_S(INFO) << "No more input when reading content body";
@@ -122,7 +123,7 @@ optional<char> ReadCharFromStdinBlocking() {
 }
 
 optional<std::string> MessageRegistry::ReadMessageFromStdin(
-    std::unique_ptr<BaseIpcMessage>* message) {
+    std::unique_ptr<InMessage>* message) {
   optional<std::string> content =
       ReadJsonRpcContentFrom(&ReadCharFromStdinBlocking);
   if (!content) {
@@ -140,7 +141,7 @@ optional<std::string> MessageRegistry::ReadMessageFromStdin(
 
 optional<std::string> MessageRegistry::Parse(
     Reader& visitor,
-    std::unique_ptr<BaseIpcMessage>* message) {
+    std::unique_ptr<InMessage>* message) {
   if (!visitor.HasMember("jsonrpc") ||
       std::string(visitor["jsonrpc"]->GetString()) != "2.0") {
     LOG_S(FATAL) << "Bad or missing jsonrpc version";
@@ -176,6 +177,17 @@ MessageRegistry* MessageRegistry::instance() {
 
 lsBaseOutMessage::~lsBaseOutMessage() = default;
 
+void lsBaseOutMessage::Write(std::ostream& out) {
+  rapidjson::StringBuffer output;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(output);
+  JsonWriter json_writer{&writer};
+  ReflectWriter(json_writer);
+
+  out << "Content-Length: " << output.GetSize() << "\r\n\r\n"
+      << output.GetString();
+  out.flush();
+}
+
 void lsResponseError::Write(Writer& visitor) {
   auto& value = *this;
   int code2 = static_cast<int>(this->code);
@@ -183,10 +195,6 @@ void lsResponseError::Write(Writer& visitor) {
   visitor.StartObject();
   REFLECT_MEMBER2("code", code2);
   REFLECT_MEMBER(message);
-  if (data) {
-    visitor.Key("data");
-    data->Write(visitor);
-  }
   visitor.EndObject();
 }
 
@@ -285,28 +293,29 @@ const lsPosition lsPosition::kZeroPosition = lsPosition();
 lsRange::lsRange() {}
 lsRange::lsRange(lsPosition start, lsPosition end) : start(start), end(end) {}
 
-bool lsRange::operator==(const lsRange& other) const {
-  return start == other.start && end == other.end;
+bool lsRange::operator==(const lsRange& o) const {
+  return start == o.start && end == o.end;
+}
+
+bool lsRange::operator<(const lsRange& o) const {
+  return !(start == o.start) ? start < o.start : end < o.end;
 }
 
 lsLocation::lsLocation() {}
 lsLocation::lsLocation(lsDocumentUri uri, lsRange range)
     : uri(uri), range(range) {}
 
-bool lsLocation::operator==(const lsLocation& other) const {
-  return uri == other.uri && range == other.range;
+bool lsLocation::operator==(const lsLocation& o) const {
+  return uri == o.uri && range == o.range;
+}
+
+bool lsLocation::operator<(const lsLocation& o) const {
+  return std::make_tuple(uri.raw_uri, range) <
+         std::make_tuple(o.uri.raw_uri, o.range);
 }
 
 bool lsTextEdit::operator==(const lsTextEdit& that) {
   return range == that.range && newText == that.newText;
-}
-
-const std::string& lsCompletionItem::InsertedContent() const {
-  if (textEdit)
-    return textEdit->newText;
-  if (!insertText.empty())
-    return insertText;
-  return label;
 }
 
 std::string Out_ShowLogMessage::method() {

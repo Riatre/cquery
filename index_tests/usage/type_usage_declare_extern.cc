@@ -11,16 +11,17 @@ OUTPUT:
       "usr": 5673439900521455039,
       "detailed_name": "T",
       "short_name": "T",
-      "kind": 6,
-      "definition_spelling": "1:8-1:9",
-      "definition_extent": "1:1-1:12",
-      "parents": [],
+      "kind": 23,
+      "declarations": [],
+      "spell": "1:8-1:9|-1|1|2",
+      "extent": "1:1-1:12|-1|1|0",
+      "bases": [],
       "derived": [],
       "types": [],
       "funcs": [],
       "vars": [],
       "instances": [0],
-      "uses": ["3:8-3:9"]
+      "uses": ["3:8-3:9|-1|1|4"]
     }],
   "funcs": [],
   "vars": [{
@@ -28,10 +29,9 @@ OUTPUT:
       "usr": 1346710425945444872,
       "detailed_name": "T t",
       "short_name": "t",
-      "declarations": ["3:10-3:11"],
-      "variable_type": 0,
+      "declarations": ["3:10-3:11|-1|1|1"],
+      "type": 0,
       "uses": [],
-      "parent_kind": 0,
       "kind": 13,
       "storage": 2
     }]

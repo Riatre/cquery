@@ -5,6 +5,7 @@
 
 #include <sparsepp/spp.h>
 
+#include <forward_list>
 #include <functional>
 
 struct QueryFile;
@@ -19,47 +20,6 @@ using QueryFuncId = Id<QueryFunc>;
 using QueryVarId = Id<QueryVar>;
 
 struct IdMap;
-
-struct SymbolIdx {
-  RawId idx;
-  SymbolKind kind;
-
-  bool operator==(const SymbolIdx& o) const {
-    return kind == o.kind && idx == o.idx;
-  }
-  bool operator!=(const SymbolIdx& o) const { return !(*this == o); }
-  bool operator<(const SymbolIdx& o) const {
-    if (kind != o.kind)
-      return kind < o.kind;
-    return idx < o.idx;
-  }
-};
-MAKE_REFLECT_STRUCT(SymbolIdx, kind, idx);
-MAKE_HASHABLE(SymbolIdx, t.kind, t.idx);
-
-struct SymbolRef : Reference {
-  SymbolRef() = default;
-  SymbolRef(Range range, Id<void> id, SymbolKind kind, SymbolRole role)
-      : Reference{range, id, kind, role} {}
-  SymbolRef(Reference ref) : Reference(ref) {}
-  SymbolRef(SymbolIdx si)
-      : Reference{Range(), Id<void>(si.idx), si.kind, SymbolRole::None} {}
-
-  RawId Idx() const { return RawId(id); }
-  operator SymbolIdx() const { return SymbolIdx{Idx(), kind, }; }
-};
-
-struct QueryFuncRef : Reference {
-  QueryFuncRef() = default;
-  QueryFuncRef(Range range, Id<void> id, SymbolKind kind, SymbolRole role)
-    : Reference{range, id, kind, role} {}
-
-  QueryFuncId FuncId() const {
-    if (kind == SymbolKind::Func)
-      return QueryFuncId(id);
-    return QueryFuncId();
-  }
-};
 
 // There are two sources of reindex updates: the (single) definition of a
 // symbol has changed, or one of many users of the symbol has changed.
@@ -116,7 +76,8 @@ struct WithFileContent {
   T value;
   std::string file_content;
 
-  WithFileContent(const T& value, const std::string& file_content) : value(value), file_content(file_content) {}
+  WithFileContent(const T& value, const std::string& file_content)
+      : value(value), file_content(file_content) {}
 };
 template <typename TVisitor, typename T>
 void Reflect(TVisitor& visitor, WithFileContent<T>& value) {
@@ -132,12 +93,13 @@ struct QueryFamily {
   using TypeId = Id<QueryType>;
   using VarId = Id<QueryVar>;
   using Range = Reference;
-  using FuncRef = QueryFuncRef;
 };
 
 struct QueryFile {
   struct Def {
+    Id<QueryFile> file;
     std::string path;
+    std::vector<std::string> args;
     // Language identifier
     std::string language;
     // Includes in the file.
@@ -163,58 +125,67 @@ struct QueryFile {
   }
 };
 MAKE_REFLECT_STRUCT(QueryFile::Def,
+                    file,
                     path,
+                    args,
                     language,
                     outline,
                     all_symbols,
                     inactive_regions,
                     dependencies);
 
-struct QueryType {
-  using Def = TypeDefDefinitionData<QueryFamily>;
+template <typename Q, typename QDef>
+struct QueryEntity {
+  using Def = QDef;
   using DefUpdate = WithUsr<Def>;
+  using DeclarationsUpdate = MergeableUpdate<Id<Q>, Use>;
+  using UsesUpdate = MergeableUpdate<Id<Q>, Use>;
+  Def* AnyDef() {
+    Def* ret = nullptr;
+    for (auto& i : static_cast<Q*>(this)->def) {
+      ret = &i;
+      if (i.spell)
+        break;
+    }
+    return ret;
+  }
+  const Def* AnyDef() const { return const_cast<QueryEntity*>(this)->AnyDef(); }
+};
+
+struct QueryType : QueryEntity<QueryType, TypeDefDefinitionData<QueryFamily>> {
   using DerivedUpdate = MergeableUpdate<QueryTypeId, QueryTypeId>;
   using InstancesUpdate = MergeableUpdate<QueryTypeId, QueryVarId>;
-  using UsesUpdate = MergeableUpdate<QueryTypeId, Reference>;
 
   Usr usr;
   Maybe<Id<void>> symbol_idx;
-  optional<Def> def;
+  std::forward_list<Def> def;
+  std::vector<Use> declarations;
   std::vector<QueryTypeId> derived;
   std::vector<QueryVarId> instances;
-  std::vector<Reference> uses;
+  std::vector<Use> uses;
 
   explicit QueryType(const Usr& usr) : usr(usr) {}
 };
 
-struct QueryFunc {
-  using Def = FuncDefDefinitionData<QueryFamily>;
-  using DefUpdate = WithUsr<Def>;
-  using DeclarationsUpdate = MergeableUpdate<QueryFuncId, Reference>;
+struct QueryFunc : QueryEntity<QueryFunc, FuncDefDefinitionData<QueryFamily>> {
   using DerivedUpdate = MergeableUpdate<QueryFuncId, QueryFuncId>;
-  using CallersUpdate = MergeableUpdate<QueryFuncId, QueryFuncRef>;
 
   Usr usr;
   Maybe<Id<void>> symbol_idx;
-  optional<Def> def;
-  std::vector<Reference> declarations;
+  std::forward_list<Def> def;
+  std::vector<Use> declarations;
   std::vector<QueryFuncId> derived;
-  std::vector<QueryFuncRef> callers;
+  std::vector<Use> uses;
 
   explicit QueryFunc(const Usr& usr) : usr(usr) {}
 };
 
-struct QueryVar {
-  using Def = VarDefDefinitionData<QueryFamily>;
-  using DefUpdate = WithUsr<Def>;
-  using DeclarationsUpdate = MergeableUpdate<QueryVarId, Reference>;
-  using UsesUpdate = MergeableUpdate<QueryVarId, Reference>;
-
+struct QueryVar : QueryEntity<QueryVar, VarDefDefinitionData<QueryFamily>> {
   Usr usr;
   Maybe<Id<void>> symbol_idx;
-  optional<Def> def;
-  std::vector<Reference> declarations;
-  std::vector<Reference> uses;
+  std::forward_list<Def> def;
+  std::vector<Use> declarations;
+  std::vector<Use> uses;
 
   explicit QueryVar(const Usr& usr) : usr(usr) {}
 };
@@ -241,19 +212,20 @@ struct IndexUpdate {
   // Type updates.
   std::vector<Usr> types_removed;
   std::vector<QueryType::DefUpdate> types_def_update;
+  std::vector<QueryType::DeclarationsUpdate> types_declarations;
   std::vector<QueryType::DerivedUpdate> types_derived;
   std::vector<QueryType::InstancesUpdate> types_instances;
   std::vector<QueryType::UsesUpdate> types_uses;
 
   // Function updates.
-  std::vector<Usr> funcs_removed;
+  std::vector<WithUsr<QueryFileId>> funcs_removed;
   std::vector<QueryFunc::DefUpdate> funcs_def_update;
   std::vector<QueryFunc::DeclarationsUpdate> funcs_declarations;
   std::vector<QueryFunc::DerivedUpdate> funcs_derived;
-  std::vector<QueryFunc::CallersUpdate> funcs_callers;
+  std::vector<QueryFunc::UsesUpdate> funcs_uses;
 
   // Variable updates.
-  std::vector<Usr> vars_removed;
+  std::vector<WithUsr<QueryFileId>> vars_removed;
   std::vector<QueryVar::DefUpdate> vars_def_update;
   std::vector<QueryVar::DeclarationsUpdate> vars_declarations;
   std::vector<QueryVar::UsesUpdate> vars_uses;
@@ -279,7 +251,7 @@ MAKE_REFLECT_STRUCT(IndexUpdate,
                     funcs_def_update,
                     funcs_declarations,
                     funcs_derived,
-                    funcs_callers,
+                    funcs_uses,
                     vars_removed,
                     vars_def_update,
                     vars_declarations,
@@ -314,13 +286,17 @@ struct QueryDatabase {
 
   // Marks the given Usrs as invalid.
   void RemoveUsrs(SymbolKind usr_kind, const std::vector<Usr>& to_remove);
+  void RemoveUsrs(SymbolKind usr_kind,
+                  const std::vector<WithUsr<QueryFileId>>& to_remove);
   // Insert the contents of |update| into |db|.
   void ApplyIndexUpdate(IndexUpdate* update);
   void ImportOrUpdate(const std::vector<QueryFile::DefUpdate>& updates);
   void ImportOrUpdate(std::vector<QueryType::DefUpdate>&& updates);
   void ImportOrUpdate(std::vector<QueryFunc::DefUpdate>&& updates);
   void ImportOrUpdate(std::vector<QueryVar::DefUpdate>&& updates);
-  void UpdateSymbols(Maybe<Id<void>>* symbol_idx, SymbolKind kind, RawId idx);
+  void UpdateSymbols(Maybe<Id<void>>* symbol_idx,
+                     SymbolKind kind,
+                     Id<void> idx);
   std::string_view GetSymbolDetailedName(RawId symbol_idx) const;
   std::string_view GetSymbolShortName(RawId symbol_idx) const;
 
@@ -330,45 +306,10 @@ struct QueryDatabase {
   Maybe<QueryFuncId> GetQueryFuncIdFromUsr(Usr usr);
   Maybe<QueryVarId> GetQueryVarIdFromUsr(Usr usr);
 
-  QueryFileId GetFileId(Reference ref) {
-    switch (ref.kind) {
-      case SymbolKind::Invalid:
-        break;
-      case SymbolKind::File:
-        return QueryFileId(ref.id);
-      case SymbolKind::Func: {
-        QueryFunc& file = funcs[ref.id.id];
-        if (file.def)
-          return file.def->file;
-        break;
-      }
-      case SymbolKind::Type: {
-        QueryType& type = types[ref.id.id];
-        if (type.def)
-          return type.def->file;
-        break;
-      }
-      case SymbolKind::Var: {
-        QueryVar& var = vars[ref.id.id];
-        if (var.def)
-          return var.def->file;
-        break;
-      }
-    }
-    return QueryFileId();
-  }
-  QueryFile& GetFile(Reference ref) {
-    return files[ref.id.id];
-  }
-  QueryFunc& GetFunc(Reference ref) {
-    return funcs[ref.id.id];
-  }
-  QueryType& GetType(Reference ref) {
-    return types[ref.id.id];
-  }
-  QueryVar& GetVar(Reference ref) {
-    return vars[ref.id.id];
-  }
+  QueryFile& GetFile(SymbolIdx ref) { return files[ref.id.id]; }
+  QueryFunc& GetFunc(SymbolIdx ref) { return funcs[ref.id.id]; }
+  QueryType& GetType(SymbolIdx ref) { return types[ref.id.id]; }
+  QueryVar& GetVar(SymbolIdx ref) { return vars[ref.id.id]; }
 };
 
 template <typename I>
@@ -379,10 +320,9 @@ template <> struct IndexToQuery<IndexFileId> { using type = QueryFileId; };
 template <> struct IndexToQuery<IndexFuncId> { using type = QueryFuncId; };
 template <> struct IndexToQuery<IndexTypeId> { using type = QueryTypeId; };
 template <> struct IndexToQuery<IndexVarId> { using type = QueryVarId; };
-template <> struct IndexToQuery<IndexFuncRef> { using type = QueryFuncRef; };
-template <> struct IndexToQuery<Range> { using type = Reference; };
-template <> struct IndexToQuery<Reference> { using type = Reference; };
-template <> struct IndexToQuery<IndexFunc::Declaration> { using type = Reference; };
+template <> struct IndexToQuery<Use> { using type = Use; };
+template <> struct IndexToQuery<SymbolRef> { using type = SymbolRef; };
+template <> struct IndexToQuery<IndexFunc::Declaration> { using type = Use; };
 template <typename I> struct IndexToQuery<optional<I>> {
   using type = optional<typename IndexToQuery<I>::type>;
 };
@@ -399,13 +339,13 @@ struct IdMap {
 
   // FIXME Too verbose
   // clang-format off
-  Reference ToQuery(Range range, SymbolRole role) const;
-  Reference ToQuery(Reference ref) const;
   QueryTypeId ToQuery(IndexTypeId id) const;
   QueryFuncId ToQuery(IndexFuncId id) const;
   QueryVarId ToQuery(IndexVarId id) const;
-  QueryFuncRef ToQuery(IndexFuncRef ref) const;
-  Reference ToQuery(IndexFunc::Declaration decl) const;
+  SymbolRef ToQuery(SymbolRef ref) const;
+  Use ToQuery(Reference ref) const;
+  Use ToQuery(Use ref) const;
+  Use ToQuery(IndexFunc::Declaration decl) const;
   template <typename I>
   Maybe<typename IndexToQuery<I>::type> ToQuery(Maybe<I> id) const {
     if (!id)
@@ -420,9 +360,7 @@ struct IdMap {
       ret.push_back(ToQuery(x));
     return ret;
   }
-  std::vector<Reference> ToQuery(const std::vector<Range>& a) const;
   // clang-format on
-
 
  private:
   spp::sparse_hash_map<IndexTypeId, QueryTypeId> cached_type_ids_;

@@ -10,9 +10,7 @@
 
 #include <stdexcept>
 
-namespace {
 bool gTestOutputMode = false;
-}  // namespace
 
 //// Elementary types
 
@@ -25,12 +23,21 @@ void Reflect(Writer& visitor, uint8_t& value) {
   visitor.Int(value);
 }
 
-void Reflect(Reader& visitor, int16_t& value) {
+void Reflect(Reader& visitor, short& value) {
   if (!visitor.IsInt())
-    throw std::invalid_argument("int16_t");
-  value = (int16_t)visitor.GetInt();
+    throw std::invalid_argument("short");
+  value = (short)visitor.GetInt();
 }
-void Reflect(Writer& visitor, int16_t& value) {
+void Reflect(Writer& visitor, short& value) {
+  visitor.Int(value);
+}
+
+void Reflect(Reader& visitor, unsigned short& value) {
+  if (!visitor.IsInt())
+    throw std::invalid_argument("unsigned short");
+  value = (unsigned short)visitor.GetInt();
+}
+void Reflect(Writer& visitor, unsigned short& value) {
   visitor.Int(value);
 }
 
@@ -125,18 +132,14 @@ void Reflect(Writer& visitor, std::string_view& data) {
     visitor.String(&data[0], (rapidjson::SizeType)data.size());
 }
 
-void Reflect(Reader& visitor, std::unique_ptr<char[]>& value) {
+void Reflect(Reader& visitor, NtString& value) {
   if (!visitor.IsString())
     throw std::invalid_argument("std::string");
-  std::string t = visitor.GetString();
-  value = std::unique_ptr<char[]>(new char[t.size() + 1]);
-  strcpy(value.get(), t.c_str());
+  value = visitor.GetString();
 }
-void Reflect(Writer& visitor, std::unique_ptr<char[]>& value) {
-  if (!value)
-    visitor.String("");
-  else
-    visitor.String(value.get());
+void Reflect(Writer& visitor, NtString& value) {
+  const char* s = value.c_str();
+  visitor.String(s ? s : "");
 }
 
 // TODO: Move this to indexer.cc
@@ -169,9 +172,9 @@ void ReflectHoverAndComments(Reader& visitor, Def& def) {
 template <typename Def>
 void ReflectHoverAndComments(Writer& visitor, Def& def) {
   // Don't emit empty hover and comments in JSON test mode.
-  if (!gTestOutputMode || def.hover.size())
+  if (!gTestOutputMode || !def.hover.empty())
     ReflectMember(visitor, "hover", def.hover);
-  if (!gTestOutputMode || def.comments.size())
+  if (!gTestOutputMode || !def.comments.empty())
     ReflectMember(visitor, "comments", def.comments);
 }
 
@@ -192,8 +195,8 @@ void ReflectShortName(Reader& visitor, Def& def) {
 template <typename Def>
 void ReflectShortName(Writer& visitor, Def& def) {
   if (gTestOutputMode) {
-    std::string short_name =
-        def.detailed_name.substr(def.short_name_offset, def.short_name_size);
+    std::string short_name(
+        def.detailed_name.substr(def.short_name_offset, def.short_name_size));
     ReflectMember(visitor, "short_name", short_name);
   } else {
     ReflectMember(visitor, "short_name_offset", def.short_name_offset);
@@ -210,10 +213,11 @@ void Reflect(TVisitor& visitor, IndexType& value) {
   ReflectShortName(visitor, value.def);
   REFLECT_MEMBER2("kind", value.def.kind);
   ReflectHoverAndComments(visitor, value.def);
-  REFLECT_MEMBER2("definition_spelling", value.def.definition_spelling);
-  REFLECT_MEMBER2("definition_extent", value.def.definition_extent);
+  REFLECT_MEMBER2("declarations", value.declarations);
+  REFLECT_MEMBER2("spell", value.def.spell);
+  REFLECT_MEMBER2("extent", value.def.extent);
   REFLECT_MEMBER2("alias_of", value.def.alias_of);
-  REFLECT_MEMBER2("parents", value.def.parents);
+  REFLECT_MEMBER2("bases", value.def.bases);
   REFLECT_MEMBER2("derived", value.derived);
   REFLECT_MEMBER2("types", value.def.types);
   REFLECT_MEMBER2("funcs", value.def.funcs);
@@ -234,13 +238,13 @@ void Reflect(TVisitor& visitor, IndexFunc& value) {
   REFLECT_MEMBER2("storage", value.def.storage);
   ReflectHoverAndComments(visitor, value.def);
   REFLECT_MEMBER2("declarations", value.declarations);
-  REFLECT_MEMBER2("definition_spelling", value.def.definition_spelling);
-  REFLECT_MEMBER2("definition_extent", value.def.definition_extent);
+  REFLECT_MEMBER2("spell", value.def.spell);
+  REFLECT_MEMBER2("extent", value.def.extent);
   REFLECT_MEMBER2("declaring_type", value.def.declaring_type);
-  REFLECT_MEMBER2("base", value.def.base);
+  REFLECT_MEMBER2("bases", value.def.bases);
   REFLECT_MEMBER2("derived", value.derived);
-  REFLECT_MEMBER2("locals", value.def.locals);
-  REFLECT_MEMBER2("callers", value.callers);
+  REFLECT_MEMBER2("vars", value.def.vars);
+  REFLECT_MEMBER2("uses", value.uses);
   REFLECT_MEMBER2("callees", value.def.callees);
   REFLECT_MEMBER_END();
 }
@@ -254,12 +258,10 @@ void Reflect(TVisitor& visitor, IndexVar& value) {
   ReflectShortName(visitor, value.def);
   ReflectHoverAndComments(visitor, value.def);
   REFLECT_MEMBER2("declarations", value.declarations);
-  REFLECT_MEMBER2("definition_spelling", value.def.definition_spelling);
-  REFLECT_MEMBER2("definition_extent", value.def.definition_extent);
-  REFLECT_MEMBER2("variable_type", value.def.variable_type);
+  REFLECT_MEMBER2("spell", value.def.spell);
+  REFLECT_MEMBER2("extent", value.def.extent);
+  REFLECT_MEMBER2("type", value.def.type);
   REFLECT_MEMBER2("uses", value.uses);
-  REFLECT_MEMBER2("parent_id", value.def.parent_id);
-  REFLECT_MEMBER2("parent_kind", value.def.parent_kind);
   REFLECT_MEMBER2("kind", value.def.kind);
   REFLECT_MEMBER2("storage", value.def.storage);
   REFLECT_MEMBER_END();
@@ -353,11 +355,12 @@ std::string Serialize(SerializeFormat format, IndexFile& file) {
   return "";
 }
 
-std::unique_ptr<IndexFile> Deserialize(SerializeFormat format,
-                                       const std::string& path,
-                                       const std::string& serialized_index_content,
-                                       const std::string& file_content,
-                                       optional<int> expected_version) {
+std::unique_ptr<IndexFile> Deserialize(
+    SerializeFormat format,
+    const std::string& path,
+    const std::string& serialized_index_content,
+    const std::string& file_content,
+    optional<int> expected_version) {
   if (serialized_index_content.empty())
     return nullptr;
 
@@ -365,20 +368,20 @@ std::unique_ptr<IndexFile> Deserialize(SerializeFormat format,
   switch (format) {
     case SerializeFormat::Json: {
       rapidjson::Document reader;
-      if (gTestOutputMode)
+      if (gTestOutputMode || !expected_version) {
         reader.Parse(serialized_index_content.c_str());
-      else {
+      } else {
         const char* p = strchr(serialized_index_content.c_str(), '\n');
         if (!p)
           return nullptr;
-        if (expected_version && atoi(serialized_index_content.c_str()) != *expected_version)
+        if (atoi(serialized_index_content.c_str()) != *expected_version)
           return nullptr;
         reader.Parse(p + 1);
       }
       if (reader.HasParseError())
         return nullptr;
 
-      file = MakeUnique<IndexFile>(path, file_content);
+      file = std::make_unique<IndexFile>(path, file_content);
       JsonReader json_reader{&reader};
       try {
         Reflect(json_reader, *file);
@@ -397,9 +400,10 @@ std::unique_ptr<IndexFile> Deserialize(SerializeFormat format,
           throw std::invalid_argument("Invalid");
         msgpack::unpacker upk;
         upk.reserve_buffer(serialized_index_content.size());
-        memcpy(upk.buffer(), serialized_index_content.data(), serialized_index_content.size());
+        memcpy(upk.buffer(), serialized_index_content.data(),
+               serialized_index_content.size());
         upk.buffer_consumed(serialized_index_content.size());
-        file = MakeUnique<IndexFile>(path, file_content);
+        file = std::make_unique<IndexFile>(path, file_content);
         MessagePackReader reader(&upk);
         Reflect(reader, major);
         Reflect(reader, minor);

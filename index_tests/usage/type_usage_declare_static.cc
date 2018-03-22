@@ -10,16 +10,17 @@ OUTPUT:
       "usr": 13487927231218873822,
       "detailed_name": "Type",
       "short_name": "Type",
-      "kind": 6,
-      "definition_spelling": "1:8-1:12",
-      "definition_extent": "1:1-1:15",
-      "parents": [],
+      "kind": 23,
+      "declarations": [],
+      "spell": "1:8-1:12|-1|1|2",
+      "extent": "1:1-1:15|-1|1|0",
+      "bases": [],
       "derived": [],
       "types": [],
       "funcs": [],
       "vars": [],
       "instances": [0],
-      "uses": ["2:8-2:12"]
+      "uses": ["2:8-2:12|-1|1|4"]
     }],
   "funcs": [],
   "vars": [{
@@ -28,11 +29,10 @@ OUTPUT:
       "detailed_name": "Type t",
       "short_name": "t",
       "declarations": [],
-      "definition_spelling": "2:13-2:14",
-      "definition_extent": "2:1-2:14",
-      "variable_type": 0,
+      "spell": "2:13-2:14|-1|1|2",
+      "extent": "2:1-2:14|-1|1|0",
+      "type": 0,
       "uses": [],
-      "parent_kind": 0,
       "kind": 13,
       "storage": 3
     }]
